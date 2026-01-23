@@ -398,24 +398,43 @@ export default function DashboardScreen() {
                 <Text style={styles.emptyText}>Nenhuma fatura para este mês.</Text>
               </View>
             }
-            renderItem={({ item }) => (
-              <View style={styles.cardItem}>
-                <View style={styles.iconBox}><Ionicons name="pricetag" size={18} color="#3B82F6" /></View>
-                <View style={{ flex: 1, paddingHorizontal: 12 }}>
-                  <Text style={styles.itemTitle} numberOfLines={1}>{item.description}</Text>
-                  {/* Mostra o vencimento original ou a data ajustada */}
-                  <Text style={styles.itemSubtitle}>Vence: {item.dateString} • {item.cardName}</Text>
+            renderItem={({ item }) => {
+              // LÓGICA DE DIAS CORRIGIDA:
+              // Compara a data de vencimento salva no item com o dia de hoje (23/01/2026)
+              const tDate = item.createdAt.toDate ? item.createdAt.toDate() : new Date(item.createdAt);
+              const today = new Date();
+              today.setHours(0, 0, 0, 0); // Zera as horas de hoje para comparar apenas o dia
+              
+              const isPast = tDate < today;
+
+              return (
+                <View style={[styles.cardItem, isPast && { opacity: 0.6 }]}>
+                  <View style={[styles.iconBox, isPast && { backgroundColor: '#334155' }]}>
+                    <Ionicons 
+                      name={isPast ? "checkmark-done" : "pricetag"} 
+                      size={18} 
+                      color={isPast ? "#94a3b8" : "#3B82F6"} 
+                    />
+                  </View>
+                  <View style={{ flex: 1, paddingHorizontal: 12 }}>
+                    <Text style={[styles.itemTitle, isPast && { textDecorationLine: 'line-through' }]} numberOfLines={1}>
+                      {item.description}
+                    </Text>
+                    <Text style={styles.itemSubtitle}>
+                      {isPast ? "Venceu dia: " : "Vence: "} {item.dateString} • {item.cardName}
+                    </Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end', marginRight: 10 }}>
+                    <Text style={styles.itemAmount}>{isValuesVisible ? `R$ ${item.amount.toFixed(2)}` : '••••'}</Text>
+                    <View style={styles.personBadge}><Text style={styles.personBadgeText}>{item.personName}</Text></View>
+                    {item.installments && <Text style={{fontSize: 9, color:'#F59E0B', fontWeight:'bold'}}>{item.installments}</Text>}
+                  </View>
+                  <TouchableOpacity onPress={() => handleDeleteTransaction(item.id)} style={styles.deleteButton}>
+                    <Ionicons name="trash-outline" size={20} color="#EF4444" />
+                  </TouchableOpacity>
                 </View>
-                <View style={{ alignItems: 'flex-end', marginRight: 10 }}>
-                  <Text style={styles.itemAmount}>{isValuesVisible ? `R$ ${item.amount.toFixed(2)}` : '••••'}</Text>
-                  <View style={styles.personBadge}><Text style={styles.personBadgeText}>{item.personName}</Text></View>
-                  {item.installments && <Text style={{fontSize: 9, color:'#F59E0B', fontWeight:'bold'}}>{item.installments}</Text>}
-                </View>
-                <TouchableOpacity onPress={() => handleDeleteTransaction(item.id)} style={styles.deleteButton}>
-                  <Ionicons name="trash-outline" size={20} color="#EF4444" />
-                </TouchableOpacity>
-              </View>
-            )}
+              );
+            }}
           />
         )}
       </View>
@@ -424,7 +443,7 @@ export default function DashboardScreen() {
         <Ionicons name="add" size={32} color="#FFF" />
       </TouchableOpacity>
 
-      {/* MODAIS (Cópia idêntica aos anteriores) */}
+      {/* MODAIS */}
       <Modal visible={salaryModalVisible} transparent animationType="fade">
         <View style={styles.alertOverlay}>
           <View style={styles.alertBox}>
@@ -502,28 +521,20 @@ export default function DashboardScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0f172a' },
-  
-  header: { 
-    paddingHorizontal: 24, paddingTop: 60, paddingBottom: 20, backgroundColor: '#0f172a'
-  },
+  header: { paddingHorizontal: 24, paddingTop: 60, paddingBottom: 20, backgroundColor: '#0f172a' },
   monthNav: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginBottom: 10 },
   monthTitle: { color: '#FFF', fontSize: 16, fontWeight: 'bold', marginHorizontal: 20 },
-  
   headerLabel: { color: '#94a3b8', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 },
   headerValue: { color: '#FFF', fontSize: 32, fontWeight: 'bold' },
   profileIcon: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#1e293b', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#334155' },
-
   salaryBox: { marginHorizontal: 20, marginTop: 5, padding: 16, backgroundColor: '#1e293b', borderRadius: 16, borderWidth: 1, borderColor: '#334155' },
   salaryHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   salaryTitle: { color: '#94a3b8', fontSize: 14, fontWeight: '600' },
   salaryValue: { color: '#FFF', fontWeight: 'bold', fontSize: 18 },
   progressBarBg: { height: 8, backgroundColor: '#0f172a', borderRadius: 4, overflow: 'hidden' },
   progressBarFill: { height: '100%', borderRadius: 4 },
-  salarySub: { color: '#64748b', fontSize: 12, marginTop: 8 },
-
   body: { flex: 1, paddingHorizontal: 20, marginTop: 20 },
   sectionTitle: { fontSize: 18, fontWeight: '700', color: '#FFF', marginBottom: 15, textTransform: 'capitalize' },
-  
   cardItem: { backgroundColor: '#1e293b', padding: 16, borderRadius: 16, marginBottom: 12, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#334155' },
   iconBox: { width: 40, height: 40, borderRadius: 12, backgroundColor: 'rgba(59, 130, 246, 0.1)', justifyContent: 'center', alignItems: 'center' },
   itemTitle: { fontSize: 16, fontWeight: '600', color: '#f1f5f9' },
@@ -531,12 +542,10 @@ const styles = StyleSheet.create({
   itemAmount: { fontSize: 16, fontWeight: '700', color: '#FFF' },
   personBadge: { backgroundColor: 'rgba(255, 255, 255, 0.1)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, marginTop: 4, alignSelf: 'flex-end' },
   personBadgeText: { color: '#3B82F6', fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase' },
-
   emptyContainer: { alignItems: 'center', marginTop: 50, opacity: 0.7 },
   emptyText: { color: '#94a3b8', marginTop: 10, fontSize: 16 },
   fab: { position: 'absolute', bottom: 30, right: 20, width: 60, height: 60, borderRadius: 30, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', elevation: 8 },
   deleteButton: { padding: 5 },
-
   modalContainer: { flex: 1, backgroundColor: '#1e293b', paddingTop: 30, paddingHorizontal: 20 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 30, marginTop: 20 },
   modalTitle: { fontSize: 24, fontWeight: '800', color: '#FFF' },
@@ -546,7 +555,6 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', justifyContent: 'space-between' },
   switchContainer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20, backgroundColor: '#0f172a', padding: 15, borderRadius: 12, borderWidth: 1, borderColor: '#334155' },
   switchLabel: { color: '#FFF', fontSize: 16, fontWeight: '600' },
-
   iosPickerButton: { backgroundColor: '#0f172a', borderRadius: 12, padding: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderWidth: 1, borderColor: '#334155' },
   pickerContainer: { backgroundColor: '#0f172a', borderRadius: 12, borderWidth: 1, borderColor: '#334155' },
   iosPickerText: { fontSize: 16, color: '#FFF' },
@@ -554,7 +562,6 @@ const styles = StyleSheet.create({
   iosModalContent: { backgroundColor: '#1e293b', borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingBottom: 40, borderWidth: 1, borderColor: '#334155' },
   iosHeader: { padding: 15, alignItems: 'flex-end', borderBottomWidth: 1, borderBottomColor: '#334155', backgroundColor: '#0f172a', borderTopLeftRadius: 20, borderTopRightRadius: 20 },
   iosDoneText: { color: '#3B82F6', fontSize: 17, fontWeight: 'bold' },
-
   alertOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', padding: 30 },
   alertBox: { backgroundColor: '#1e293b', borderRadius: 20, padding: 25, width: '100%', alignItems: 'center', borderWidth: 1, borderColor: '#334155' },
   alertTitle: { fontSize: 20, fontWeight: 'bold', color: '#FFF', marginTop: 10, marginBottom: 10 },
