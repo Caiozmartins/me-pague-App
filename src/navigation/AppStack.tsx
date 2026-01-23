@@ -2,7 +2,6 @@ import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 
-// Telas
 import DashboardScreen from '../screens/Dashboard/DashboardScreen';
 import PeopleListScreen from '../screens/People/PeopleListScreen';
 import CardsScreen from '../screens/Cards/CardsScreen';
@@ -25,7 +24,6 @@ export default function AppStack() {
         tabBarActiveTintColor: '#007AFF',
         tabBarInactiveTintColor: 'gray',
         tabBarStyle: { paddingBottom: 6, height: 64 },
-
         tabBarIcon: ({ focused, color, size }) => {
           let iconName: keyof typeof Ionicons.glyphMap = 'alert';
 
@@ -33,15 +31,12 @@ export default function AppStack() {
             case 'Dashboard':
               iconName = focused ? 'home' : 'home-outline';
               break;
-
             case 'Pessoas':
               iconName = focused ? 'people' : 'people-outline';
               break;
-
             case 'Cartões':
               iconName = focused ? 'card' : 'card-outline';
               break;
-
             case 'Relatórios':
               iconName = focused ? 'bar-chart' : 'bar-chart-outline';
               break;
