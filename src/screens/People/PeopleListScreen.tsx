@@ -1,142 +1,148 @@
 import React, { useState, useEffect, useContext } from 'react';
 import { 
-  View, Text, StyleSheet, FlatList, TouchableOpacity, 
-  TextInput, Modal, Alert, ActivityIndicator, KeyboardAvoidingView, Platform 
+  View, Text, StyleSheet, TouchableOpacity, 
+  FlatList, Modal, TextInput, Alert, ActivityIndicator 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
-import { collection, addDoc, query, where, onSnapshot, deleteDoc, doc } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, addDoc, deleteDoc, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../../config/firebaseConfig';
 import { AuthContext } from '../../contexts/AuthContext';
+import { Person } from '../../types';
 
-interface Person {
-  id: string;
-  name: string;
-}
-
-const AVATAR_COLORS = ['#3B82F6', '#8B5CF6', '#10B981', '#F59E0B', '#EC4899'];
-
-export default function PeopleListScreen() {
+export default function PeopleListScreen({ navigation }: any) {
   const { user } = useContext(AuthContext);
   const [people, setPeople] = useState<Person[]>([]);
   const [loading, setLoading] = useState(true);
-  
   const [modalVisible, setModalVisible] = useState(false);
-  const [newName, setNewName] = useState('');
+  const [name, setName] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
     const q = query(collection(db, "people"), where("userId", "==", user.uid));
+    
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Person[];
-      setPeople(list);
+      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as Person[];
+      // Ordena por nome
+      setPeople(list.sort((a, b) => a.name.localeCompare(b.name)));
       setLoading(false);
     });
     return () => unsubscribe();
   }, [user]);
 
-  async function handleAddPerson() {
-    if (!newName.trim()) return Alert.alert("Erro", "Digite um nome!");
+  async function handleSavePerson() {
+    if (!name.trim()) return Alert.alert("Erro", "Digite o nome.");
+    
     try {
-      await addDoc(collection(db, "people"), {
-        userId: user?.uid, name: newName.trim(), createdAt: new Date()
-      });
-      setModalVisible(false);
-      setNewName('');
-      Alert.alert("Sucesso", "Pessoa adicionada! 👥");
-    } catch (error) {
+      if (editingId) {
+        await updateDoc(doc(db, "people", editingId), { name: name.trim() });
+      } else {
+        await addDoc(collection(db, "people"), {
+          userId: user?.uid,
+          name: name.trim(),
+          currentBalance: 0,
+          createdAt: new Date().toISOString()
+        });
+      }
+      closeModal();
+    } catch {
       Alert.alert("Erro", "Não foi possível salvar.");
     }
   }
 
+  function handleEdit(person: Person) {
+    setEditingId(person.id);
+    setName(person.name);
+    setModalVisible(true);
+  }
+
   async function handleDelete(id: string) {
-    Alert.alert("Remover Pessoa", "Isso não apaga o histórico de compras dela, apenas o nome da lista.", [
+    Alert.alert("Excluir", "Deseja remover essa pessoa da lista?", [
       { text: "Cancelar", style: "cancel" },
-      { text: "Remover", style: "destructive", onPress: async () => {
-        await deleteDoc(doc(db, "people", id));
+      { text: "Excluir", style: "destructive", onPress: async () => {
+          await deleteDoc(doc(db, "people", id));
       }}
     ]);
   }
 
-  const getInitials = (name: string) => name.charAt(0).toUpperCase();
+  const closeModal = () => {
+    setModalVisible(false);
+    setEditingId(null);
+    setName('');
+  };
 
   return (
     <View style={styles.container}>
-      
-      {/* HEADER LIMPO (SEM BOX) */}
       <View style={styles.header}>
         <View>
-          <Text style={styles.headerTitle}>Pessoas</Text>
-          <Text style={styles.headerSubtitle}>Quem usa seus cartões?</Text>
+          <Text style={styles.headerLabel}>Pessoas</Text>
+          <Text style={styles.headerCount}>{people.length} contatos</Text>
         </View>
         <TouchableOpacity style={styles.addButton} onPress={() => setModalVisible(true)}>
-          <LinearGradient
-            colors={['#3B82F6', '#2563EB']}
-            style={styles.addButtonGradient}
-          >
-            <Ionicons name="add" size={28} color="#FFF" />
-          </LinearGradient>
+          <Ionicons name="person-add" size={24} color="#FFF" />
         </TouchableOpacity>
       </View>
 
-      {/* LISTA */}
       {loading ? (
-        <ActivityIndicator size="large" color="#3B82F6" style={{ marginTop: 50 }} />
+        <ActivityIndicator color="#3B82F6" style={{ marginTop: 50 }} />
       ) : (
         <FlatList
           data={people}
           keyExtractor={item => item.id}
-          contentContainerStyle={{ paddingBottom: 100, paddingHorizontal: 20, paddingTop: 10 }}
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Ionicons name="people-outline" size={60} color="#334155" />
-              <Text style={styles.emptyText}>Ninguém cadastrado.</Text>
-              <Text style={styles.emptySubText}>Toque no + para adicionar familiares.</Text>
-            </View>
-          }
-          renderItem={({ item, index }) => (
-            <View style={styles.cardItem}>
-              <View style={styles.personInfo}>
-                <View style={[styles.avatar, { backgroundColor: AVATAR_COLORS[index % AVATAR_COLORS.length] }]}>
-                  <Text style={styles.avatarText}>{getInitials(item.name)}</Text>
-                </View>
-                <Text style={styles.personName}>{item.name}</Text>
+          contentContainerStyle={{ padding: 20 }}
+          renderItem={({ item }) => (
+            <TouchableOpacity 
+              style={styles.personCard}
+              onPress={() => navigation.navigate('PersonDetail', { personId: item.id, personName: item.name })}
+            >
+              <View style={styles.avatar}>
+                <Text style={styles.avatarText}>{item.name.charAt(0).toUpperCase()}</Text>
               </View>
               
-              <TouchableOpacity style={styles.deleteButton} onPress={() => handleDelete(item.id)}>
-                 <Ionicons name="trash-outline" size={20} color="#ef4444" />
-              </TouchableOpacity>
-            </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.personName}>{item.name}</Text>
+                <Text style={styles.balanceLabel}>Saldo atual</Text>
+                <Text style={[styles.balanceValue, { color: item.currentBalance > 0 ? '#EF4444' : '#10B981' }]}>
+                  R$ {item.currentBalance?.toFixed(2) || "0.00"}
+                </Text>
+              </View>
+
+              <View style={styles.actions}>
+                <TouchableOpacity onPress={() => handleEdit(item)} style={styles.actionBtn}>
+                  <Ionicons name="pencil" size={18} color="#3B82F6" />
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => handleDelete(item.id)} style={styles.actionBtn}>
+                  <Ionicons name="trash" size={18} color="#EF4444" />
+                </TouchableOpacity>
+              </View>
+            </TouchableOpacity>
           )}
         />
       )}
 
-      {/* MODAL DARK */}
-      <Modal visible={modalVisible} animationType="fade" transparent={true}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+      {/* Modal Cadastro/Edição */}
+      <Modal visible={modalVisible} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Nova Pessoa</Text>
-              <TouchableOpacity onPress={() => setModalVisible(false)}>
-                <Ionicons name="close" size={24} color="#94a3b8" />
-              </TouchableOpacity>
-            </View>
-            
-            <Text style={styles.inputLabel}>Nome ou Apelido</Text>
+            <Text style={styles.modalTitle}>{editingId ? 'Editar Nome' : 'Nova Pessoa'}</Text>
             <TextInput 
               style={styles.input} 
-              placeholder="Ex: Esposa, Marido, Filho..." 
+              placeholder="Nome" 
               placeholderTextColor="#64748b"
-              value={newName} 
-              onChangeText={setNewName} 
+              value={name}
+              onChangeText={setName}
               autoFocus
             />
-
-            <TouchableOpacity style={styles.saveButton} onPress={handleAddPerson}>
-              <Text style={styles.saveButtonText}>Salvar</Text>
-            </TouchableOpacity>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={[styles.btn, styles.btnCancel]} onPress={closeModal}>
+                <Text style={styles.btnText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.btn, styles.btnSave]} onPress={handleSavePerson}>
+                <Text style={styles.btnText}>Salvar</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </KeyboardAvoidingView>
+        </View>
       </Modal>
     </View>
   );
@@ -144,55 +150,28 @@ export default function PeopleListScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0f172a' },
-  
-  // HEADER LIMPO (Seamless)
-  header: { 
-    flexDirection: 'row', justifyContent: 'space-between',
-    paddingHorizontal: 24, paddingTop: 70, paddingBottom: 20,
-    alignItems: 'center',
-    backgroundColor: '#0f172a' // Mesma cor do container
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 24, paddingTop: 60, paddingBottom: 20 },
+  headerLabel: { color: '#FFF', fontSize: 28, fontWeight: 'bold' },
+  headerCount: { color: '#94a3b8', fontSize: 14 },
+  addButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center' },
+  personCard: { 
+    backgroundColor: '#1e293b', borderRadius: 16, padding: 16, marginBottom: 12,
+    flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#334155'
   },
-  headerTitle: { fontSize: 32, fontWeight: 'bold', color: '#FFF' },
-  headerSubtitle: { fontSize: 14, color: '#94a3b8', marginTop: 5 },
-  
-  addButton: { shadowColor: "#3B82F6", shadowOpacity: 0.4, shadowOffset: {width: 0, height: 4}, shadowRadius: 8 },
-  addButtonGradient: { width: 50, height: 50, borderRadius: 25, justifyContent: 'center', alignItems: 'center' },
-
-  // CARD ITEM
-  cardItem: { 
-    backgroundColor: '#1e293b', padding: 16, borderRadius: 16, marginBottom: 12,
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    borderWidth: 1, borderColor: '#334155'
-  },
-  personInfo: { flexDirection: 'row', alignItems: 'center', gap: 15 },
-  avatar: { 
-    width: 45, height: 45, borderRadius: 23, justifyContent: 'center', alignItems: 'center',
-    shadowColor: "#000", shadowOpacity: 0.3, shadowOffset: {width: 0, height: 2}
-  },
-  avatarText: { color: '#FFF', fontSize: 18, fontWeight: 'bold' },
-  personName: { fontSize: 18, fontWeight: '600', color: '#f1f5f9' },
-  deleteButton: { padding: 8, backgroundColor: 'rgba(239, 68, 68, 0.1)', borderRadius: 8 },
-
-  // EMPTY STATE
-  emptyContainer: { alignItems: 'center', marginTop: 100, opacity: 0.7 },
-  emptyText: { color: '#FFF', fontSize: 18, fontWeight: 'bold', marginTop: 20 },
-  emptySubText: { color: '#94a3b8', fontSize: 14, marginTop: 5 },
-
-  // MODAL STYLE
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', padding: 20 },
-  modalContent: { 
-    backgroundColor: '#1e293b', borderRadius: 24, padding: 24, 
-    borderWidth: 1, borderColor: '#334155', width: '100%', maxWidth: 400, alignSelf: 'center'
-  },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
-  modalTitle: { fontSize: 20, fontWeight: 'bold', color: '#FFF' },
-  
-  inputLabel: { color: '#94a3b8', fontSize: 12, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 },
-  input: { 
-    backgroundColor: '#0f172a', color: '#FFF', borderRadius: 12, padding: 16, 
-    fontSize: 16, borderWidth: 1, borderColor: '#334155', marginBottom: 20
-  },
-  
-  saveButton: { backgroundColor: '#3B82F6', paddingVertical: 16, borderRadius: 12, alignItems: 'center' },
-  saveButtonText: { color: '#FFF', fontWeight: 'bold', fontSize: 16 }
+  avatar: { width: 50, height: 50, borderRadius: 25, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center', marginRight: 15 },
+  avatarText: { color: '#FFF', fontSize: 20, fontWeight: 'bold' },
+  personName: { color: '#FFF', fontSize: 18, fontWeight: 'bold', marginBottom: 4 },
+  balanceLabel: { color: '#94a3b8', fontSize: 12 },
+  balanceValue: { fontSize: 16, fontWeight: 'bold' },
+  actions: { flexDirection: 'row', gap: 10 },
+  actionBtn: { padding: 8, backgroundColor: '#0f172a', borderRadius: 8 },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', padding: 24 },
+  modalContent: { backgroundColor: '#1e293b', borderRadius: 20, padding: 24, borderWidth: 1, borderColor: '#334155' },
+  modalTitle: { color: '#FFF', fontSize: 20, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
+  input: { backgroundColor: '#0f172a', color: '#FFF', borderRadius: 12, padding: 16, fontSize: 16, marginBottom: 20 },
+  modalButtons: { flexDirection: 'row', gap: 12 },
+  btn: { flex: 1, padding: 16, borderRadius: 12, alignItems: 'center' },
+  btnCancel: { backgroundColor: '#334155' },
+  btnSave: { backgroundColor: '#3B82F6' },
+  btnText: { color: '#FFF', fontWeight: 'bold' }
 });

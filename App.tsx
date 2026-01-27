@@ -2,7 +2,8 @@ import 'react-native-gesture-handler';
 import 'react-native-get-random-values';
 
 import React, { useContext, useEffect, useState, useCallback } from 'react';
-import { View, ActivityIndicator, StyleSheet } from 'react-native';
+import { View, ActivityIndicator, StyleSheet, Alert } from 'react-native';
+import * as LocalAuthentication from 'expo-local-authentication';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer } from '@react-navigation/native';
 import * as SplashScreen from 'expo-splash-screen'; // Importando a Splash Screen
@@ -47,6 +48,22 @@ export default function App() {
         console.warn(e);
       } finally {
         // Diz para o app que está tudo pronto para renderizar
+// --- INÍCIO DO BLOQUEIO BIOMÉTRICO ---
+        const hasHardware = await LocalAuthentication.hasHardwareAsync();
+        const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+
+        if (hasHardware && isEnrolled) {
+          const auth = await LocalAuthentication.authenticateAsync({
+            promptMessage: 'Autenticação Biométrica',
+            fallbackLabel: 'Usar senha padrão',
+          });
+
+          if (!auth.success) {
+            return Alert.alert("Acesso Negado", "Você precisa se autenticar para entrar.");
+          }
+        }
+        // --- FIM DO BLOQUEIO ---
+
         setAppIsReady(true);
       }
     }

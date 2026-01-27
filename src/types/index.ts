@@ -4,7 +4,7 @@
 export type AuthProvider = 'email' | 'google';
 export type IncomeType = 'salary' | 'bico' | 'extra' | 'refund';
 
-// 1. O Usuário (Você/O "Banco")
+// 1. O Usuário
 export interface User {
   id: string;
   email: string;
@@ -13,15 +13,17 @@ export interface User {
   createdAt: string; 
 }
 
-// 2. Cartão de Crédito
+// 2. Cartão de Crédito (AJUSTADO)
 export interface Card {
   id: string;
   userId: string;
-  name: string;      // Ex: "Nubank Violeta"
-  bank: string;      // Ex: "Nubank"
-  limit: number;     // Limite total
-  closingDay: number; // Dia que fecha a fatura (Melhor dia de compra)
-  dueDay: number;     // Dia do vencimento
+  name: string;
+  bank?: string;
+  totalLimit: number;     // Limite total aprovado
+  availableLimit: number; // Limite que sobra após as compras
+  closingDay: number;
+  dueDay?: number;
+  last4: string;
   createdAt: string;
 }
 
@@ -31,7 +33,7 @@ export interface Person {
   userId: string;
   name: string;           // Ex: "Mãe", "João"
   note?: string;
-  currentBalance: number; // Otimização: Saldo atualizado (Positivo = te deve)
+  currentBalance: number; // Saldo atualizado (Positivo = te deve)
   createdAt: string;
 }
 
@@ -41,32 +43,33 @@ export interface Transaction {
   userId: string;
   personId: string;       // Quem gastou
   cardId: string;         // Qual cartão usou
+  cardName: string;       // Nome do cartão para exibição rápida
+  personName: string;     // Nome da pessoa para exibição rápida
   amount: number;         // Valor da parcela (ou total se à vista)
-  date: string;           // Data da compra (ISO Date)
+  dateString: string;     // Data formatada para exibição
   
-  // Campos calculados para facilitar relatórios
-  invoiceMonth: string;   // Ex: "2024-05" (Mês de competência da fatura)
+  invoiceMonth: string;   // Ex: "2024-05"
   
   description: string;
-  category: string;       // Ex: "Alimentação", "Uber"
+  category: string;       
   
-  // Controle de parcelamento
   isInstallment: boolean;
-  installmentCount: number;    // Total de parcelas (ex: 10)
-  installmentIndex: number;    // Qual é essa parcela (ex: 1)
-  installmentGroupId?: string; // ID único que une todas as 10 parcelas dessa compra
+  installmentCount: number;    
+  installmentIndex: number;    
+  installmentGroupId?: string; 
   
-  createdAt: string;
+  paid: boolean;          // Controle de pagamento
+  createdAt: any;         // Timestamp do Firebase
 }
 
 // 5. Pagamento (Quando alguém te paga)
 export interface Payment {
   id: string;
   userId: string;
-  personId: string; // Quem pagou
+  personId: string; 
   amount: number;
   date: string;
-  note?: string;    // Ex: "Pix referente ao Uber"
+  note?: string;    
   createdAt: string;
 }
 
