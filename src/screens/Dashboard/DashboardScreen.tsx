@@ -1,5 +1,8 @@
 // DashboardScreen.tsx
 import React, { useState, useEffect, useContext } from 'react';
+import { signOut } from 'firebase/auth'; 
+import { auth } from '../../config/firebaseConfig'; 
+const REVOLVING_INTEREST = 0.12; // 12% de juros sobre o que não for pago (Crédito Rotativo)
 import {
   View,
   Text,
@@ -60,7 +63,7 @@ interface Transaction {
   cardName: string;
   personName: string;
   personId: string;
-  cardId?: string; // Adicionado para controle de estorno
+  cardId?: string; 
   createdAt: any;
   dateString: string;
   installments?: string | null;
@@ -73,7 +76,7 @@ const SmartPicker = ({
   selectedValue,
   onValueChange,
   placeholder = 'Selecione...',
-  variant = 'input', // 'input' | 'compact'
+  variant = 'input', 
 }: {
   label?: string;
   items: PickerItem[];
@@ -177,6 +180,73 @@ const SmartPicker = ({
 export default function DashboardScreen() {
   const { user } = useContext(AuthContext);
 
+  // Estados de Controle e UI
+  const [menuVisible, setMenuVisible] = useState(false); 
+  const [alertVisible, setAlertVisible] = useState(false); // Adicionado
+  const [dueAlerts, setDueAlerts] = useState<string[]>([]); // Adicionado
+
+  async function handlePayBill(amountPaid: number, cardId: string) {
+    if (!cardId) return Alert.alert("Erro", "Selecione um cartão primeiro.");
+    if (isNaN(amountPaid) || amountPaid <= 0) return Alert.alert("Erro", "Valor inválido.");
+
+    try {
+      const cardObj = myCards.find(c => c.value === cardId);
+      if (!cardObj) return;
+
+      const cardTransactions = filteredTransactions.filter(t => t.cardId === cardId && !t.paid);
+      const totalDue = cardTransactions.reduce((acc, t) => acc + (t.amount || 0), 0);
+
+      if (totalDue === 0) return Alert.alert("Aviso", "Não há faturas pendentes para este cartão neste mês.");
+
+      const cardRef = doc(db, "cards", cardId);
+      const cardSnap = await getDoc(cardRef);
+      if (cardSnap.exists()) {
+        const currentAvailable = cardSnap.data().availableLimit || 0;
+        await updateDoc(cardRef, { availableLimit: currentAvailable + amountPaid });
+      }
+
+      if (amountPaid < totalDue) {
+        const remaining = totalDue - amountPaid;
+        const interest = remaining * REVOLVING_INTEREST;
+        const nextMonthDate = new Date(currentDate);
+        nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
+
+        await addDoc(collection(db, "transactions"), {
+          userId: user?.uid,
+          description: `Resíduo + Encargos (${cardObj.label})`,
+          category: 'Outros',
+          amount: parseFloat((remaining + interest).toFixed(2)),
+          cardId: cardId,
+          cardName: cardObj.label,
+          personId: user?.uid, 
+          personName: user?.displayName || 'Eu (Titular)',
+          createdAt: Timestamp.fromDate(nextMonthDate),
+          paid: false
+        });
+        
+        Alert.alert("Atenção", "Fatura paga parcialmente. O saldo restante com juros foi lançado na próxima fatura.");
+      } else {
+        Alert.alert("Sucesso", "Fatura quitada totalmente!");
+      }
+
+      const batchPromises = cardTransactions.map(t => 
+        updateDoc(doc(db, "transactions", t.id), { paid: true })
+      );
+      await Promise.all(batchPromises);
+
+    } catch (error) {
+      Alert.alert("Erro", "Falha ao processar pagamento.");
+    }
+  }
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth); 
+    } catch (error) {
+      Alert.alert("Erro", "Não foi possível sair do app.");
+    }
+  };
+
   const [filteredTransactions, setFilteredTransactions] = useState<Transaction[]>([]);
   const [myCards, setMyCards] = useState<any[]>([]);
   const [myPeople, setMyPeople] = useState<any[]>([]);
@@ -195,7 +265,7 @@ export default function DashboardScreen() {
   const [categoryFilter, setCategoryFilter] = useState('all');
 
   const [desc, setDesc] = useState('');
-  const [category, setCategory] = useState(CATEGORIES[0]); // evita "Outros" inexistente
+  const [category, setCategory] = useState(CATEGORIES[0]); 
   const [amount, setAmount] = useState('');
   const [dateText, setDateText] = useState('');
   const [selectedCard, setSelectedCard] = useState('');
@@ -214,7 +284,6 @@ export default function DashboardScreen() {
     ...myPeople,
   ];
 
-  // ---------- LISTA DO MÊS (FIRESTORE) + FILTRO DE CATEGORIA ----------
   useEffect(() => {
     if (!user) return;
     setLoading(true);
@@ -251,7 +320,6 @@ export default function DashboardScreen() {
     return () => unsubTrans();
   }, [user, currentDate, categoryFilter]);
 
-  // ---------- SALÁRIO + CARTÕES + PESSOAS ----------
   useEffect(() => {
     if (!user) return;
 
@@ -267,10 +335,27 @@ export default function DashboardScreen() {
         const list = snap.docs.map((d) => ({
           label: d.data().name,
           value: d.id,
-          day: d.data().closingDay, // no seu código isso está como closingDay (mantenho)
+          day: d.data().closingDay, 
         }));
         setMyCards(list);
         if (list.length > 0 && !selectedCard) setSelectedCard(list[0].value);
+
+        // --- LÓGICA DO ALERTA DE VENCIMENTO ---
+        const today = new Date().getDate();
+        const alerts: string[] = [];
+        list.forEach((card: any) => {
+          const dueDay = parseInt(card.day);
+          if (!isNaN(dueDay)) {
+            const diff = dueDay - today;
+            if (diff >= 0 && diff <= 3) {
+              alerts.push(diff === 0 ? `O cartão ${card.label} vence HOJE!` : `O cartão ${card.label} vence em ${diff} dias.`);
+            }
+          }
+        });
+        if (alerts.length > 0) {
+          setDueAlerts(alerts);
+          setAlertVisible(true);
+        }
       }
     );
 
@@ -290,7 +375,6 @@ export default function DashboardScreen() {
     };
   }, [user]);
 
-  // ---------- HELPERS ----------
   const changeMonth = (direction: number) => {
     const newDate = new Date(currentDate);
     newDate.setMonth(newDate.getMonth() + direction);
@@ -313,8 +397,6 @@ export default function DashboardScreen() {
     setDateText(new Date().toLocaleDateString('pt-BR'));
     setModalVisible(true);
   };
-
-  // ---------- AÇÕES (MODIFICADAS) ----------
   
   async function handleTogglePaid(item: Transaction) {
     try {
@@ -323,13 +405,11 @@ export default function DashboardScreen() {
       
       await updateDoc(ref, { paid: nextPaid });
 
-      // Atualiza o saldo da pessoa
       if (item.personId) {
         const personRef = doc(db, 'people', item.personId);
         const personSnap = await getDoc(personRef);
         if (personSnap.exists()) {
           const currentBalance = personSnap.data().currentBalance || 0;
-          // Se marcou como pago (true), subtrai da dívida. Se desmarcou (false), soma de volta.
           const newBalance = nextPaid ? currentBalance - item.amount : currentBalance + item.amount;
           await updateDoc(personRef, { currentBalance: newBalance });
         }
@@ -353,11 +433,10 @@ export default function DashboardScreen() {
             if (transSnap.exists()) {
               const transData = transSnap.data();
               const valorEstorno = transData.amount || 0;
-              const idDoCartao = transData.cardId; // ID salvo na criação
+              const idDoCartao = transData.cardId; 
               const idDaPessoa = transData.personId;
               const isPaid = transData.paid;
 
-              // 1. Estorna o limite do cartão
               if (idDoCartao) {
                 const cardRef = doc(db, 'cards', idDoCartao);
                 const cardSnap = await getDoc(cardRef);
@@ -367,7 +446,6 @@ export default function DashboardScreen() {
                 }
               }
 
-              // 2. Estorna a dívida da pessoa (Se ainda não foi paga)
               if (idDaPessoa && !isPaid) {
                 const personRef = doc(db, 'people', idDaPessoa);
                 const personSnap = await getDoc(personRef);
@@ -399,7 +477,6 @@ export default function DashboardScreen() {
     const d = item.createdAt?.toDate ? item.createdAt.toDate() : new Date();
     setDateText(d.toLocaleDateString('pt-BR'));
 
-    // edição = 1 lançamento; não faz sentido parcelar aqui
     setIsInstallment(false);
     setInstallmentsCount('2');
 
@@ -432,7 +509,6 @@ export default function DashboardScreen() {
       const personObj = myPeople.find((p) => p.value === selectedPerson);
 
       if (editingId) {
-        // --- LÓGICA DE EDIÇÃO ---
         const ref = doc(db, 'transactions', editingId);
         
         const oldSnap = await getDoc(ref);
@@ -441,7 +517,6 @@ export default function DashboardScreen() {
           const oldPaid = oldSnap.data().paid || false;
           const diff = rawValue - oldAmount;
           
-          // Ajusta Cartão (Diferença)
           if (selectedCard) {
             const cardRef = doc(db, "cards", selectedCard);
             const cardSnap = await getDoc(cardRef);
@@ -451,7 +526,6 @@ export default function DashboardScreen() {
             }
           }
 
-          // Ajusta Pessoa (Diferença) - Apenas se não estiver pago
           if (selectedPerson && !oldPaid) {
             const personRef = doc(db, "people", selectedPerson);
             const personSnap = await getDoc(personRef);
@@ -482,7 +556,6 @@ export default function DashboardScreen() {
         return;
       }
 
-      // --- LÓGICA DE CRIAÇÃO (NOVA) ---
       const totalInstallments = isInstallment ? parseInt(installmentsCount) : 1;
       if (Number.isNaN(totalInstallments) || totalInstallments < 1) {
         return Alert.alert('Erro', 'Número de parcelas inválido.');
@@ -509,7 +582,7 @@ export default function DashboardScreen() {
               isInstallment && totalInstallments > 1 ? `${desc} (${i + 1}/${totalInstallments})` : desc,
             category,
             amount: parseFloat(installmentValue.toFixed(2)),
-            cardId: selectedCard, // SALVA O ID DO CARTÃO AQUI
+            cardId: selectedCard, 
             cardName: cardObj?.label || '?',
             personId: selectedPerson,
             personName: personObj?.label || '?',
@@ -522,7 +595,6 @@ export default function DashboardScreen() {
 
       await Promise.all(batchPromises);
 
-      // Atualiza Limite do Cartão (Subtrai Total)
       if (selectedCard) {
         const cardRef = doc(db, "cards", selectedCard);
         const cardSnap = await getDoc(cardRef);
@@ -532,7 +604,6 @@ export default function DashboardScreen() {
         }
       }
 
-      // Atualiza Saldo da Pessoa (Soma Total)
       if (selectedPerson) {
         const personRef = doc(db, "people", selectedPerson);
         const personSnap = await getDoc(personRef);
@@ -561,7 +632,6 @@ export default function DashboardScreen() {
     setSalaryModalVisible(false);
   }
 
-  // ---------- CÁLCULOS ----------
   const monthTotal = filteredTransactions.reduce((acc, t) => acc + (t.amount || 0), 0);
 
   const salarySpent =
@@ -573,7 +643,7 @@ export default function DashboardScreen() {
 
   const salaryPercent = salary > 0 ? (salarySpent / salary) * 100 : 0;
   const progressColor = salaryPercent > 90 ? '#EF4444' : salaryPercent > 60 ? '#F59E0B' : '#10B981';
-
+  
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
@@ -583,7 +653,7 @@ export default function DashboardScreen() {
           <TouchableOpacity onPress={() => changeMonth(-1)}>
             <Ionicons name="chevron-back" size={24} color="#FFF" />
           </TouchableOpacity>
-
+      
           <Text style={styles.monthTitle}>
             {currentDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }).toUpperCase()}
           </Text>
@@ -593,7 +663,7 @@ export default function DashboardScreen() {
           </TouchableOpacity>
         </View>
 
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 15 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 15 }}>
           <View>
             <Text style={styles.headerLabel}>Fatura Estimada</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
@@ -612,15 +682,36 @@ export default function DashboardScreen() {
             </View>
           </View>
 
-          <TouchableOpacity
-            style={styles.profileIcon}
-            onPress={() => {
-              setTempSalary(String(salary));
-              setSalaryModalVisible(true);
-            }}
-          >
-            <Ionicons name="cash-outline" size={20} color="#FFF" />
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            {/* NOVO BOTÃO DE PAGAR FATURA */}
+            <TouchableOpacity 
+              style={styles.payBillButton}
+              onPress={() => {
+                Alert.prompt(
+                  "Pagar Fatura",
+                  "Digite o valor que deseja pagar da fatura deste cartão:",
+                  [
+                    { text: "Cancelar", style: "cancel" },
+                    { 
+                      text: "Confirmar", 
+                      onPress: (val?: string) => handlePayBill(parseFloat(val?.replace(',','.') || "0"), selectedCard)
+                    }
+                  ],
+                  "plain-text",
+                  monthTotal.toString()
+                );
+              }}
+            >
+              <Text style={styles.payBillText}>PAGAR</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.profileIcon} 
+              onPress={() => setMenuVisible(true)} 
+            >
+              <Ionicons name="person-circle-outline" size={28} color="#FFF" />
+            </TouchableOpacity>
+          </View>
         </View>
       </View>
 
@@ -656,7 +747,6 @@ export default function DashboardScreen() {
             Extrato de {currentDate.toLocaleDateString('pt-BR', { month: 'long' })}
           </Text>
 
-          {/* CATEGORIA (corrigida: compact, sem "dark sugado") */}
           <View style={{ width: 170 }}>
             <SmartPicker
               items={categoryFilterItems}
@@ -734,7 +824,6 @@ export default function DashboardScreen() {
         <Ionicons name="add" size={32} color="#FFF" />
       </TouchableOpacity>
 
-      {/* MODAL NOVA / EDITAR */}
       <Modal visible={modalVisible} animationType="slide" presentationStyle="pageSheet">
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -820,7 +909,6 @@ export default function DashboardScreen() {
               </>
             )}
 
-            {/* CATEGORIA (corrigida: normal, sem “sugar”) */}
             <SmartPicker
               label="Categoria"
               items={CATEGORIES.map((c) => ({ label: c, value: c }))}
@@ -867,7 +955,6 @@ export default function DashboardScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* MODAL SALÁRIO */}
       <Modal visible={salaryModalVisible} transparent animationType="fade">
         <View style={styles.alertOverlay}>
           <View style={styles.alertBox}>
@@ -890,7 +977,58 @@ export default function DashboardScreen() {
           </View>
         </View>
       </Modal>
-    </View>
+
+      {/* NOVO: MODAL DE ALERTA DE VENCIMENTO */}
+      <Modal visible={alertVisible} transparent animationType="fade">
+        <View style={styles.alertOverlay}>
+          <View style={styles.alertBox}>
+            <Ionicons name="warning" size={40} color="#EF4444" />
+            <Text style={styles.alertTitle}>Atenção!</Text>
+            {dueAlerts.map((msg, index) => <Text key={index} style={styles.alertText}>{msg}</Text>)}
+            <TouchableOpacity style={styles.alertButton} onPress={() => setAlertVisible(false)}>
+              <Text style={styles.alertButtonText}>OK</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* MODAL MENU DO PERFIL */}
+      <Modal visible={menuVisible} transparent animationType="fade">
+        <TouchableOpacity 
+          style={styles.menuOverlay} 
+          activeOpacity={1} 
+          onPress={() => setMenuVisible(false)}
+        >
+          <View style={styles.menuContent}>
+            <View style={styles.menuHeader}>
+              <Ionicons name="person-circle" size={50} color="#3B82F6" />
+              <Text style={styles.menuUserEmail}>{user?.email}</Text>
+            </View>
+
+            <TouchableOpacity 
+              style={styles.menuItem} 
+              onPress={() => {
+                setMenuVisible(false);
+                setTempSalary(String(salary));
+                setSalaryModalVisible(true);
+              }}
+            >
+              <Ionicons name="cash-outline" size={22} color="#FFF" />
+              <Text style={styles.menuItemText}>Definir Salário</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={[styles.menuItem, { borderBottomWidth: 0 }]} 
+              onPress={handleLogout}
+            >
+              <Ionicons name="log-out-outline" size={22} color="#EF4444" />
+              <Text style={[styles.menuItemText, { color: '#EF4444' }]}>Sair do App</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+    </View> 
   );
 }
 
@@ -912,6 +1050,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: '#334155',
+  },
+
+  payBillButton: {
+    backgroundColor: '#10B981',
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  payBillText: {
+    color: '#FFF',
+    fontWeight: 'bold',
+    fontSize: 14,
   },
 
   salaryBox: { marginHorizontal: 20, padding: 16, backgroundColor: '#1e293b', borderRadius: 16, borderWidth: 1, borderColor: '#334155' },
@@ -969,7 +1121,6 @@ const styles = StyleSheet.create({
   saveButton: { backgroundColor: '#3B82F6', borderRadius: 12, padding: 18, alignItems: 'center', marginTop: 10, marginHorizontal: 20 },
   saveButtonText: { color: '#FFF', fontWeight: 'bold', fontSize: 16 },
 
-  // ---- SmartPicker (corrigido) ----
   pickerBox: {
     backgroundColor: '#0f172a',
     borderRadius: 12,
@@ -1007,5 +1158,41 @@ const styles = StyleSheet.create({
   alertOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', padding: 20 },
   alertBox: { backgroundColor: '#1e293b', borderRadius: 20, padding: 25, width: '100%', alignItems: 'center', borderWidth: 1, borderColor: '#334155' },
   alertTitle: { fontSize: 20, fontWeight: 'bold', color: '#FFF', marginBottom: 15 },
+  alertText: { fontSize: 16, color: '#cbd5e1', marginBottom: 15, textAlign: 'center' }, // Adicionado
+  alertButton: { backgroundColor: '#EF4444', paddingVertical: 12, paddingHorizontal: 30, borderRadius: 10, width: '100%', alignItems: 'center' }, // Adicionado
+  alertButtonText: { color: '#FFF', fontWeight: 'bold' }, // Adicionado
   salaryInput: { backgroundColor: '#0f172a', color: '#FFF', fontSize: 24, padding: 15, width: '100%', textAlign: 'center', borderRadius: 12, marginBottom: 15, borderWidth: 1, borderColor: '#334155' },
+
+  menuOverlay: { 
+    flex: 1, 
+    backgroundColor: 'rgba(0,0,0,0.7)', 
+    justifyContent: 'flex-start', 
+    alignItems: 'flex-end', 
+    paddingTop: 80, 
+    paddingRight: 20 
+  },
+  menuContent: { 
+    backgroundColor: '#1e293b', 
+    borderRadius: 20, 
+    width: 220, 
+    padding: 15, 
+    borderWidth: 1, 
+    borderColor: '#334155' 
+  },
+  menuHeader: { 
+    alignItems: 'center', 
+    borderBottomWidth: 1, 
+    borderBottomColor: '#334155', 
+    paddingBottom: 15, 
+    marginBottom: 10 
+  },
+  menuUserEmail: { color: '#94a3b8', fontSize: 12, marginTop: 5 },
+  menuItem: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    paddingVertical: 12, 
+    borderBottomWidth: 1, 
+    borderBottomColor: '#334155' 
+  },
+  menuItemText: { color: '#FFF', marginLeft: 10, fontSize: 16 },
 });

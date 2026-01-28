@@ -1,28 +1,26 @@
 {
   "expo": {
-    "name": "Seu App Financeiro",
-    "slug": "seu-app-financeiro",
+    "name": "Me Pague",
+    "slug": "me-pague-app",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "dark", 
-    
+    "userInterfaceStyle": "dark",
     "splash": {
       "image": "./assets/inicio.png",
       "resizeMode": "contain",
       "backgroundColor": "#0f172a"
     },
-    
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.seu.app"
+      "bundleIdentifier": "com.caio.mepague"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0f172a"
       },
-      "package": "com.seu.app"
+      "package": "com.caio.mepague"
     },
     "web": {
       "favicon": "./assets/favicon.png"
