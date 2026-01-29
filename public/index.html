@@ -11,29 +11,24 @@
   <title>Me Pague</title>
 
   <style>
-    /* 3. CORREÇÃO ESSENCIAL DE ALTURA */
-    html, body {
-      height: 100%;
-      width: 100%;
-      margin: 0;
-      padding: 0;
-      background-color: #0f172a; /* Fundo do app */
-      overflow: hidden; /* Evita rolagem elástica indesejada no fundo */
-    }
+  *, *::before, *::after { box-sizing: border-box; }
 
-    /* 4. AJUSTE DO ROOT + PROTEÇÃO CONTRA A "FRANJA" (NOTCH) */
-    #root {
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      
-      /* Aqui está o segredo: empurra o conteúdo para baixo exatamente o tamanho da barra */
-      padding-top: env(safe-area-inset-top);
-      padding-bottom: env(safe-area-inset-bottom);
-      padding-left: env(safe-area-inset-left);
-      padding-right: env(safe-area-inset-right);
-    }
-  </style>
+  html, body, #root {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    background: #0f172a;
+  }
+
+  body { overflow: hidden; }
+
+  #root {
+    display: flex;
+    flex-direction: column;
+  }
+</style>
+
 </head>
 <body>
   <div id="root"></div>
