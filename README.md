@@ -1,4 +1,4 @@
-# 💳 Me Pague - Engenharia Financeira & Gestão de Crédito
+# 💳 Me Pague - Engenharia Financeira & Gestão de Crédito Pessoal
 
 > **Versão:** 1.0.1 (Stable)
 > **Status:** 🚀 Em Produção (Fase Beta)
