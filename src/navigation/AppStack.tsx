@@ -1,4 +1,5 @@
 import React from 'react';
+import { Platform } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -21,9 +22,12 @@ export default function AppStack() {
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
-        tabBarActiveTintColor: '#007AFF',
-        tabBarInactiveTintColor: 'gray',
-        tabBarStyle: { paddingBottom: 6, height: 64 },
+        tabBarActiveTintColor: '#3B82F6',
+        tabBarInactiveTintColor: '#94a3b8',
+        tabBarStyle: {
+          backgroundColor: '#0f172a',
+          borderTopColor: '#334155',
+        },
         tabBarIcon: ({ focused, color, size }) => {
           let iconName: keyof typeof Ionicons.glyphMap = 'alert';
 

@@ -2,7 +2,7 @@
   "expo": {
     "name": "Me Pague",
     "slug": "me-pague-app",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -24,6 +24,11 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "1ef98964-4116-4b21-8adc-0d0286ae7d4d"
+      }
     }
   }
 }
