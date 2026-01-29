@@ -117,6 +117,8 @@ const styles = StyleSheet.create({
   title: { fontSize: 32, fontWeight: 'bold', textAlign: 'center', color: '#FFF' },
   subtitle: { fontSize: 14, color: '#94a3b8', textAlign: 'center', marginBottom: 40 },
   form: { width: '100%' },
+  
+  // 👇 AQUI ESTÁ A CORREÇÃO DO ZOOM
   input: { 
     backgroundColor: '#1e293b', 
     padding: 18, 
@@ -124,8 +126,10 @@ const styles = StyleSheet.create({
     marginBottom: 15, 
     borderWidth: 1, 
     borderColor: '#334155',
-    color: '#FFF'
+    color: '#FFF',
+    fontSize: 16, // <--- TAMANHO 16 IMPEDE O ZOOM NO IPHONE
   },
+  
   forgotButton: { alignSelf: 'flex-end', marginBottom: 20 },
   forgotText: { color: '#3B82F6', fontSize: 13 },
   button: { 

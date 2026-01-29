@@ -201,7 +201,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   installButton: {
-    backgroundColor: '#f40009',
+    backgroundColor: '#007bffff',
     paddingVertical: 10,
     paddingHorizontal: 16,
     borderRadius: 12,
