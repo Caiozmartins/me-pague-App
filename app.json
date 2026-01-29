@@ -23,8 +23,16 @@
       "package": "com.caio.mepague"
     },
     "web": {
-      "favicon": "./assets/favicon.png"
-    },
+    "favicon": "./assets/favicon.png",
+    "name": "Me Pague",
+    "shortName": "Me Pague",
+    "lang": "pt-BR",
+    "display": "standalone",
+    "backgroundColor": "#0f172a",
+    "themeColor": "#0f172a",
+    "startUrl": "/",
+    "description": "Controle financeiro inteligente"
+},
     "extra": {
       "eas": {
         "projectId": "1ef98964-4116-4b21-8adc-0d0286ae7d4d"

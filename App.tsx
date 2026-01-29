@@ -1,3 +1,4 @@
+import PWAInstallPrompt from './src/components/PWAInstallPrompt';
 import 'react-native-gesture-handler';
 import 'react-native-get-random-values';
 
@@ -68,6 +69,10 @@ export default function App() {
           <NavigationContainer>
             <Root />
           </NavigationContainer>
+          
+          {/* ✅ AQUI ESTÁ: O componente de instalação PWA */}
+          <PWAInstallPrompt />
+          
         </AuthProvider>
       </SafeAreaProvider>
     </View>
