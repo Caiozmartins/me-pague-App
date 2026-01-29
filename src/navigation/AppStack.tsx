@@ -1,33 +1,37 @@
 import React from 'react';
 import { Platform } from 'react-native';
-import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+// ✅ ajuste os caminhos conforme seu projeto:
 import DashboardScreen from '../screens/Dashboard/DashboardScreen';
 import PeopleListScreen from '../screens/People/PeopleListScreen';
 import CardsScreen from '../screens/Cards/CardsScreen';
 import ReportsScreen from '../screens/Reports/ReportsScreen';
 
-export type AppTabParamList = {
-  Dashboard: undefined;
-  Pessoas: undefined;
-  Cartões: undefined;
-  Relatórios: undefined;
-};
-
-const Tab = createBottomTabNavigator<AppTabParamList>();
+const Tab = createBottomTabNavigator();
 
 export default function AppStack() {
+  const insets = useSafeAreaInsets();
+  const BASE_TAB_HEIGHT = Platform.OS === 'ios' ? 56 : 60;
+
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
+        tabBarHideOnKeyboard: true,
         tabBarActiveTintColor: '#3B82F6',
         tabBarInactiveTintColor: '#94a3b8',
         tabBarStyle: {
           backgroundColor: '#0f172a',
           borderTopColor: '#334155',
+          borderTopWidth: 1,
+          height: BASE_TAB_HEIGHT + insets.bottom,
+          paddingBottom: Math.max(insets.bottom, 8),
+          paddingTop: 8,
         },
+        tabBarLabelStyle: { fontSize: 12 },
         tabBarIcon: ({ focused, color, size }) => {
           let iconName: keyof typeof Ionicons.glyphMap = 'alert';
 
