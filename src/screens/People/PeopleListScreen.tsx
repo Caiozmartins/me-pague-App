@@ -4,12 +4,16 @@ import {
   FlatList, Modal, TextInput, Alert, ActivityIndicator 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { collection, query, where, onSnapshot, addDoc, deleteDoc, doc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, addDoc, deleteDoc, doc, updateDoc, getDocs, limit } from 'firebase/firestore';
+import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { db } from '../../config/firebaseConfig';
 import { AuthContext } from '../../contexts/AuthContext';
 import { Person } from '../../types';
+import { PeopleStackParamList } from '../../navigation/types';
 
-export default function PeopleListScreen({ navigation }: any) {
+type Props = NativeStackScreenProps<PeopleStackParamList, 'PeopleList'>;
+
+export default function PeopleListScreen({ navigation }: Props) {
   const { user } = useContext(AuthContext);
   const [people, setPeople] = useState<Person[]>([]);
   const [loading, setLoading] = useState(true);
@@ -21,12 +25,20 @@ export default function PeopleListScreen({ navigation }: any) {
     if (!user) return;
     const q = query(collection(db, "people"), where("userId", "==", user.uid));
     
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as Person[];
-      // Ordena por nome
-      setPeople(list.sort((a, b) => a.name.localeCompare(b.name)));
-      setLoading(false);
-    });
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() })) as Person[];
+        // Ordena por nome
+        setPeople(list.sort((a, b) => a.name.localeCompare(b.name)));
+        setLoading(false);
+      },
+      (error) => {
+        console.error('PeopleList snapshot error:', error);
+        setLoading(false);
+        Alert.alert("Permissão", "Sem permissão para listar pessoas. Verifique as regras do Firestore.");
+      }
+    );
     return () => unsubscribe();
   }, [user]);
 
@@ -59,9 +71,29 @@ export default function PeopleListScreen({ navigation }: any) {
   async function handleDelete(id: string) {
     Alert.alert("Excluir", "Deseja remover essa pessoa da lista?", [
       { text: "Cancelar", style: "cancel" },
-      { text: "Excluir", style: "destructive", onPress: async () => {
-          await deleteDoc(doc(db, "people", id));
-      }}
+      {
+        text: "Excluir",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            const hasTransactionsQuery = query(
+              collection(db, "transactions"),
+              where("userId", "==", user?.uid),
+              where("personId", "==", id),
+              limit(1)
+            );
+            const hasTransactionsSnap = await getDocs(hasTransactionsQuery);
+            if (!hasTransactionsSnap.empty) {
+              Alert.alert("Bloqueado", "Não é possível excluir: essa pessoa possui transações vinculadas.");
+              return;
+            }
+
+            await deleteDoc(doc(db, "people", id));
+          } catch {
+            Alert.alert("Erro", "Não foi possível excluir essa pessoa.");
+          }
+        },
+      }
     ]);
   }
 

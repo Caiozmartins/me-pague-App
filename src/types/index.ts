@@ -3,6 +3,7 @@
 // Tipos auxiliares
 export type AuthProvider = 'email' | 'google';
 export type IncomeType = 'salary' | 'bico' | 'extra' | 'refund';
+export type TransactionOrigin = 'purchase' | 'revolving';
 
 // 1. O Usuário
 export interface User {
@@ -59,6 +60,7 @@ export interface Transaction {
   installmentGroupId?: string; 
   
   paid: boolean;          // Controle de pagamento
+  origin?: TransactionOrigin; // Origem da transação (compra ou rotativo)
   createdAt: any;         // Timestamp do Firebase
 }
 

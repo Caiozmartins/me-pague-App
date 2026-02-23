@@ -3,11 +3,11 @@ import {
   View, Text, StyleSheet, TouchableOpacity, 
   Dimensions, Modal, TextInput, Alert, Platform, UIManager, LayoutAnimation, ScrollView
 } from 'react-native';
-import { Ionicons, FontAwesome5 } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { 
   collection, query, where, onSnapshot, addDoc, 
-  deleteDoc, doc, updateDoc, getDoc 
+  deleteDoc, doc, updateDoc, getDoc, getDocs, limit
 } from 'firebase/firestore';
 import { db } from '../../config/firebaseConfig';
 import { AuthContext } from '../../contexts/AuthContext';
@@ -31,18 +31,26 @@ export default function CardsScreen() {
   const [newName, setNewName] = useState('');
   const [newLimit, setNewLimit] = useState('');
   const [newClosingDay, setNewClosingDay] = useState('');
+  const [newDueDay, setNewDueDay] = useState('');
   const [newLast4, setNewLast4] = useState('');
 
   useEffect(() => {
     if (!user) return;
     const q = query(collection(db, "cards"), where("userId", "==", user.uid));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-        const list = snapshot.docs.map(doc => ({ 
-          id: doc.id, 
-          ...doc.data() 
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const list = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
         })) as Card[];
         setCards(list);
-    });
+      },
+      (error) => {
+        console.error('Cards snapshot error:', error);
+        Alert.alert("Permissão", "Sem permissão para listar cartões. Verifique as regras do Firestore.");
+      }
+    );
     return () => unsubscribe();
   }, [user]);
 
@@ -51,6 +59,7 @@ export default function CardsScreen() {
     setNewName(card.name);
     setNewLimit(String(card.totalLimit));
     setNewClosingDay(String(card.closingDay));
+    setNewDueDay(String(card.dueDay ?? ''));
     setNewLast4(card.last4);
     setModalVisible(true);
   };
@@ -58,11 +67,11 @@ export default function CardsScreen() {
   const closeModal = () => {
     setModalVisible(false);
     setEditingId(null);
-    setNewName(''); setNewLimit(''); setNewClosingDay(''); setNewLast4('');
+    setNewName(''); setNewLimit(''); setNewClosingDay(''); setNewDueDay(''); setNewLast4('');
   };
 
   async function handleSaveCard() {
-    if (!newName || !newLimit || !newClosingDay || !newLast4) {
+    if (!newName || !newLimit || !newClosingDay || !newDueDay || !newLast4) {
       return Alert.alert("Erro", "Preencha todos os campos!");
     }
     
@@ -82,11 +91,12 @@ export default function CardsScreen() {
           
           await updateDoc(cardRef, {
             name: newName,
-            totalLimit: limitValue,
-            availableLimit: oldAvailable + difference, 
-            closingDay: Number(newClosingDay), 
-            last4: newLast4,
-          });
+              totalLimit: limitValue,
+              availableLimit: oldAvailable + difference, 
+              closingDay: Number(newClosingDay), 
+              dueDay: Number(newDueDay),
+              last4: newLast4,
+            });
           Alert.alert("Sucesso", "Cartão e limites atualizados! 💳");
         }
       } else {
@@ -96,6 +106,7 @@ export default function CardsScreen() {
           totalLimit: limitValue,
           availableLimit: limitValue,
           closingDay: Number(newClosingDay), 
+          dueDay: Number(newDueDay),
           last4: newLast4,
           createdAt: new Date().toISOString()
         });
@@ -112,10 +123,30 @@ export default function CardsScreen() {
   async function handleDelete(id: string) {
     Alert.alert("Excluir", "Deseja remover este cartão?", [
       { text: "Cancelar", style: "cancel" },
-      { text: "Excluir", style: "destructive", onPress: async () => {
-        await deleteDoc(doc(db, "cards", id));
-        setActiveCardIndex(null);
-      }}
+      {
+        text: "Excluir",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            const hasTransactionsQuery = query(
+              collection(db, "transactions"),
+              where("userId", "==", user?.uid),
+              where("cardId", "==", id),
+              limit(1)
+            );
+            const hasTransactionsSnap = await getDocs(hasTransactionsQuery);
+            if (!hasTransactionsSnap.empty) {
+              Alert.alert("Bloqueado", "Não é possível excluir: este cartão possui transações vinculadas.");
+              return;
+            }
+
+            await deleteDoc(doc(db, "cards", id));
+            setActiveCardIndex(null);
+          } catch {
+            Alert.alert("Erro", "Não foi possível excluir este cartão.");
+          }
+        }
+      }
     ]);
   }
 
@@ -178,6 +209,10 @@ export default function CardsScreen() {
                         <Text style={styles.cardLabel}>FECHAMENTO</Text>
                         <Text style={styles.cardValue}>DIA {card.closingDay}</Text>
                       </View>
+                      <View>
+                        <Text style={styles.cardLabel}>VENCIMENTO</Text>
+                        <Text style={styles.cardValue}>DIA {card.dueDay ?? '--'}</Text>
+                      </View>
                     </View>
                     <Text style={styles.cardName}>{card.name}</Text>
                   </LinearGradient>
@@ -209,6 +244,9 @@ export default function CardsScreen() {
                 <TextInput style={styles.input} keyboardType="numeric" maxLength={2} value={newClosingDay} onChangeText={setNewClosingDay} placeholder="Dia" placeholderTextColor="#64748b" />
               </View>
             </View>
+
+            <Text style={styles.inputLabel}>Dia Venc.</Text>
+            <TextInput style={styles.input} keyboardType="numeric" maxLength={2} value={newDueDay} onChangeText={setNewDueDay} placeholder="Dia" placeholderTextColor="#64748b" />
 
             <View style={styles.modalButtons}>
               <TouchableOpacity style={[styles.btn, styles.btnCancel]} onPress={closeModal}>

@@ -2,15 +2,28 @@ import React from 'react';
 import { Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { PeopleStackParamList } from './types';
 
 // ✅ ajuste os caminhos conforme seu projeto:
 import DashboardScreen from '../screens/Dashboard/DashboardScreen';
 import PeopleListScreen from '../screens/People/PeopleListScreen';
+import PersonDetailScreen from '../screens/People/PersonDetailScreen';
 import CardsScreen from '../screens/Cards/CardsScreen';
 import ReportsScreen from '../screens/Reports/ReportsScreen';
 
 const Tab = createBottomTabNavigator();
+const PeopleStack = createNativeStackNavigator<PeopleStackParamList>();
+
+function PeopleStackNavigator() {
+  return (
+    <PeopleStack.Navigator screenOptions={{ headerShown: false }}>
+      <PeopleStack.Screen name="PeopleList" component={PeopleListScreen} />
+      <PeopleStack.Screen name="PersonDetail" component={PersonDetailScreen} />
+    </PeopleStack.Navigator>
+  );
+}
 
 export default function AppStack() {
   const insets = useSafeAreaInsets();
@@ -55,7 +68,7 @@ export default function AppStack() {
       })}
     >
       <Tab.Screen name="Dashboard" component={DashboardScreen} />
-      <Tab.Screen name="Pessoas" component={PeopleListScreen} />
+      <Tab.Screen name="Pessoas" component={PeopleStackNavigator} />
       <Tab.Screen name="Cartões" component={CardsScreen} />
       <Tab.Screen name="Relatórios" component={ReportsScreen} />
     </Tab.Navigator>

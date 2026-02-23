@@ -22,7 +22,9 @@ import { TextInputMask } from 'react-native-masked-text';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import {
+  addDoc,
   collection,
+  deleteDoc,
   query,
   where,
   onSnapshot,
@@ -32,14 +34,16 @@ import {
   setDoc,
   Timestamp,
   runTransaction,
+  writeBatch,
 } from 'firebase/firestore';
 import { signOut } from 'firebase/auth';
+import * as Notifications from 'expo-notifications';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { db, auth } from '../../config/firebaseConfig';
 import { AuthContext } from '../../contexts/AuthContext';
-import { startOfMonth, endOfMonth } from 'date-fns';
+import { startOfMonth, endOfMonth, addMonths } from 'date-fns';
 
-// Regra de Negócio: Juros de 12% sobre o saldo devedor (Crédito Rotativo)
 const REVOLVING_INTEREST = 0.12;
 
 const CATEGORIES = [
@@ -70,6 +74,19 @@ interface Transaction {
   dateString: string;
   installments?: string | null;
   paid?: boolean;
+  origin?: 'purchase' | 'revolving';
+}
+
+interface TrialSubscription {
+  id: string;
+  userId: string;
+  name: string;
+  cardId: string;
+  cardName: string;
+  endDate: any;
+  notifyDaysBefore: number;
+  notificationId?: string | null;
+  createdAt?: any;
 }
 
 /* SmartPicker: Substitui o seletor nativo por um Modal cross-platform. */
@@ -80,6 +97,7 @@ function SmartPicker({
   onValueChange,
   placeholder = 'Selecione...',
   variant = 'input',
+  fullWidth = false,
 }: {
   label?: string;
   items: PickerItem[];
@@ -87,6 +105,7 @@ function SmartPicker({
   onValueChange: (v: string) => void;
   placeholder?: string;
   variant?: 'input' | 'compact';
+  fullWidth?: boolean;
 }) {
   const [showModal, setShowModal] = useState(false);
   const isCompact = variant === 'compact';
@@ -94,7 +113,7 @@ function SmartPicker({
   const displayLabel = selectedItem ? selectedItem.label : placeholder;
 
   return (
-    <View style={[styles.inputGroup, isCompact && { marginBottom: 0, paddingHorizontal: 0 }]}>
+    <View style={[styles.inputGroup, isCompact && { marginBottom: 0, paddingHorizontal: 0 }, fullWidth && { paddingHorizontal: 0 }]}>
       {!!label && <Text style={styles.label}>{label}</Text>}
 
       <TouchableOpacity
@@ -164,6 +183,7 @@ export default function DashboardScreen() {
 
   // Estados de Dados do Firestore
   const [filteredTransactions, setFilteredTransactions] = useState<Transaction[]>([]);
+  const [monthTransactions, setMonthTransactions] = useState<Transaction[]>([]);
   const [myCards, setMyCards] = useState<PickerItem[]>([]);
   const [myPeople, setMyPeople] = useState<PickerItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -178,6 +198,13 @@ export default function DashboardScreen() {
   const [salaryFilter, setSalaryFilter] = useState('all');
   const [salaryModalVisible, setSalaryModalVisible] = useState(false);
   const [tempSalary, setTempSalary] = useState('');
+  const [trialModalVisible, setTrialModalVisible] = useState(false);
+  const [trialSubscriptions, setTrialSubscriptions] = useState<TrialSubscription[]>([]);
+  const [trialName, setTrialName] = useState('');
+  const [trialCardId, setTrialCardId] = useState('');
+  const [trialEndDateText, setTrialEndDateText] = useState('');
+  const [trialNotifyDays, setTrialNotifyDays] = useState('1');
+  const [isSavingTrial, setIsSavingTrial] = useState(false);
 
   // Formulário de Despesa (Novo/Editar)
   const [modalVisible, setModalVisible] = useState(false);
@@ -197,13 +224,71 @@ export default function DashboardScreen() {
   ];
 
   const peopleFilterItems: PickerItem[] = [{ label: 'Todos (Fatura Total)', value: 'all' }, ...myPeople];
+  const isOwnerPersonId = (personId?: string | null) => Boolean(user?.uid && personId === user.uid);
+  const formatMonthKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+  const getInvoiceMonthKeyFromPurchaseDate = (purchaseDate: Date, closingDayRaw?: number) => {
+    const closingDay = Number(closingDayRaw);
+    if (!Number.isFinite(closingDay) || closingDay <= 0) return formatMonthKey(purchaseDate);
+    const maxDay = new Date(purchaseDate.getFullYear(), purchaseDate.getMonth() + 1, 0).getDate();
+    const safeClosingDay = Math.min(Math.max(Math.trunc(closingDay), 1), maxDay);
+    const invoiceDate = new Date(purchaseDate);
+    if (purchaseDate.getDate() > safeClosingDay) {
+      invoiceDate.setMonth(invoiceDate.getMonth() + 1);
+    }
+    return formatMonthKey(invoiceDate);
+  };
+  const getCardClosingDay = (cardId?: string) => {
+    if (!cardId) return undefined;
+    const card = myCards.find((c) => c.value === cardId);
+    return Number(card?.day);
+  };
+  const getNextDateByDay = (day: number, hour = 9) => {
+    const now = new Date();
+    let year = now.getFullYear();
+    let month = now.getMonth();
+
+    const buildDate = (targetYear: number, targetMonth: number) => {
+      const maxDay = new Date(targetYear, targetMonth + 1, 0).getDate();
+      const targetDay = Math.min(Math.max(day, 1), maxDay);
+      return new Date(targetYear, targetMonth, targetDay, hour, 0, 0, 0);
+    };
+
+    let candidate = buildDate(year, month);
+    if (candidate <= now) {
+      month += 1;
+      if (month > 11) {
+        month = 0;
+        year += 1;
+      }
+      candidate = buildDate(year, month);
+    }
+    return candidate;
+  };
+  const parsePtBrDate = (value: string) => {
+    const parts = value.split('/');
+    if (parts.length !== 3) return null;
+    const day = parseInt(parts[0], 10);
+    const month = parseInt(parts[1], 10) - 1;
+    const year = parseInt(parts[2], 10);
+    const parsed = new Date(year, month, day);
+    if (Number.isNaN(parsed.getTime())) return null;
+    if (parsed.getDate() !== day || parsed.getMonth() !== month || parsed.getFullYear() !== year) return null;
+    return parsed;
+  };
+  const toPtBrDate = (value: Date) => value.toLocaleDateString('pt-BR');
+  const getTrialReminderDate = (endDate: Date, notifyDaysBefore: number) => {
+    const reminder = new Date(endDate);
+    reminder.setDate(reminder.getDate() - Math.max(1, notifyDaysBefore));
+    reminder.setHours(9, 0, 0, 0);
+    return reminder;
+  };
 
   // Listener das Transações (Real-time)
   useEffect(() => {
     if (!user) return;
     setLoading(true);
 
-    const start = Timestamp.fromDate(startOfMonth(currentDate));
+    const start = Timestamp.fromDate(startOfMonth(addMonths(currentDate, -1)));
     const end = Timestamp.fromDate(endOfMonth(currentDate));
 
     const qTrans = query(
@@ -214,24 +299,42 @@ export default function DashboardScreen() {
       orderBy('createdAt', 'desc')
     );
 
-    const unsubTrans = onSnapshot(qTrans, (snap) => {
-      const list = snap.docs.map((d) => {
-        const data: any = d.data();
-        const dateObj = data.createdAt?.toDate ? data.createdAt.toDate() : new Date();
-        return {
-          id: d.id,
-          ...data,
-          dateString: dateObj.toLocaleDateString('pt-BR'),
-        };
-      }) as Transaction[];
+    const unsubTrans = onSnapshot(
+      qTrans,
+      (snap) => {
+        const list = snap.docs.map((d) => {
+          const data: any = d.data();
+          const dateObj = data.createdAt?.toDate ? data.createdAt.toDate() : new Date();
+          return {
+            id: d.id,
+            ...data,
+            dateString: dateObj.toLocaleDateString('pt-BR'),
+          };
+        }) as Transaction[];
 
-      const finalList = categoryFilter === 'all' ? list : list.filter((t) => t.category === categoryFilter);
-      setFilteredTransactions(finalList);
-      setLoading(false);
-    });
+        const currentMonthKey = formatMonthKey(currentDate);
+        const invoicesMonthList = list.filter((t) => {
+          const purchaseDate = t.createdAt?.toDate ? t.createdAt.toDate() : null;
+          if (!purchaseDate) return false;
+          const closingDay = getCardClosingDay(t.cardId);
+          return getInvoiceMonthKeyFromPurchaseDate(purchaseDate, closingDay) === currentMonthKey;
+        });
+
+        setMonthTransactions(invoicesMonthList);
+        const finalList =
+          categoryFilter === 'all' ? invoicesMonthList : invoicesMonthList.filter((t) => t.category === categoryFilter);
+        setFilteredTransactions(finalList);
+        setLoading(false);
+      },
+      (error) => {
+        console.error('Dashboard transactions snapshot error:', error);
+        setLoading(false);
+        Alert.alert('Permissão', 'Sem permissão para ler transações. Verifique as regras do Firestore.');
+      }
+    );
 
     return () => unsubTrans();
-  }, [user, currentDate, categoryFilter]);
+  }, [user, currentDate, categoryFilter, myCards]);
 
   // Listener de Cartões, Pessoas e Preferências
   useEffect(() => {
@@ -243,43 +346,58 @@ export default function DashboardScreen() {
       if (docSnap.exists()) setSalary(docSnap.data().salary || 0);
     })();
 
-    const unsubCards = onSnapshot(query(collection(db, 'cards'), where('userId', '==', user.uid)), (snap) => {
-      const list: PickerItem[] = snap.docs.map((d) => ({
-        label: d.data().name,
-        value: d.id,
-        day: d.data().closingDay,
-      }));
-      setMyCards(list);
+    const unsubCards = onSnapshot(
+      query(collection(db, 'cards'), where('userId', '==', user.uid)),
+      (snap) => {
+        const list: PickerItem[] = snap.docs.map((d) => ({
+          label: d.data().name,
+          value: d.id,
+          day: d.data().closingDay,
+          dueDay: d.data().dueDay,
+          totalLimit: d.data().totalLimit,
+          availableLimit: d.data().availableLimit,
+        }));
+        setMyCards(list);
 
-      if (list.length > 0 && !selectedCard) setSelectedCard(list[0].value);
+        if (list.length > 0 && !selectedCard) setSelectedCard(list[0].value);
 
-      // Alerta de Vencimento (Janela de 3 dias)
-      const today = new Date().getDate();
-      const alerts: string[] = [];
-      list.forEach((card) => {
-        const dueDay = Number(card.day);
-        if (!Number.isNaN(dueDay) && dueDay > 0) {
-          const diff = dueDay - today;
-          if (diff >= 0 && diff <= 3) {
-            alerts.push(
-              diff === 0 ? `O cartão ${card.label} vence HOJE!` : `O cartão ${card.label} vence em ${diff} dias.`
-            );
+        // Alerta de Vencimento (Janela de 3 dias)
+        const today = new Date().getDate();
+        const alerts: string[] = [];
+        list.forEach((card) => {
+          const dueDay = Number(card.dueDay ?? card.day);
+          if (!Number.isNaN(dueDay) && dueDay > 0) {
+            const diff = dueDay - today;
+            if (diff >= 0 && diff <= 3) {
+              alerts.push(
+                diff === 0 ? `O cartão ${card.label} vence HOJE!` : `O cartão ${card.label} vence em ${diff} dias.`
+              );
+            }
           }
+        });
+
+        if (alerts.length > 0) {
+          setDueAlerts(alerts);
+          setAlertVisible(true);
         }
-      });
-
-      if (alerts.length > 0) {
-        setDueAlerts(alerts);
-        setAlertVisible(true);
+      },
+      (error) => {
+        console.error('Dashboard cards snapshot error:', error);
       }
-    });
+    );
 
-    const unsubPeople = onSnapshot(query(collection(db, 'people'), where('userId', '==', user.uid)), (snap) => {
-      const dbList = snap.docs.map((d) => ({ label: d.data().name, value: d.id }));
-      const ownerOption = { label: user.displayName || 'Eu (Titular)', value: user.uid };
-      setMyPeople([ownerOption, ...dbList]);
-      if (!selectedPerson) setSelectedPerson(ownerOption.value);
-    });
+    const unsubPeople = onSnapshot(
+      query(collection(db, 'people'), where('userId', '==', user.uid)),
+      (snap) => {
+        const dbList = snap.docs.map((d) => ({ label: d.data().name, value: d.id }));
+        const ownerOption = { label: user.displayName || 'Eu (Titular)', value: user.uid };
+        setMyPeople([ownerOption, ...dbList]);
+        if (!selectedPerson) setSelectedPerson(ownerOption.value);
+      },
+      (error) => {
+        console.error('Dashboard people snapshot error:', error);
+      }
+    );
 
     return () => {
       unsubCards();
@@ -287,6 +405,223 @@ export default function DashboardScreen() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const unsubTrials = onSnapshot(
+      query(collection(db, 'trial_subscriptions'), where('userId', '==', user.uid)),
+      (snap) => {
+        const list = snap.docs
+          .map((d) => ({ id: d.id, ...(d.data() as any) }) as TrialSubscription)
+          .sort((a, b) => {
+            const aMs = a.endDate?.toDate ? a.endDate.toDate().getTime() : 0;
+            const bMs = b.endDate?.toDate ? b.endDate.toDate().getTime() : 0;
+            return aMs - bMs;
+          });
+        setTrialSubscriptions(list);
+      },
+      (error: any) => {
+        if (error?.code === 'permission-denied') {
+          console.warn('Trial subscriptions snapshot skipped: missing Firestore permission.');
+          return;
+        }
+        console.error('Trial subscriptions snapshot error:', error);
+      }
+    );
+
+    return () => unsubTrials();
+  }, [user]);
+
+  // Fechamento automático: snapshot mensal por cartão
+  useEffect(() => {
+    if (!user || myCards.length === 0) return;
+
+    const monthKey = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
+
+    const syncInvoices = async () => {
+      try {
+        const byCard = new Map<
+          string,
+          {
+            cardName: string;
+            totalAmount: number;
+            paidAmount: number;
+            pendingAmount: number;
+            revolvingAmount: number;
+            transactionCount: number;
+          }
+        >();
+
+        myCards.forEach((card) => {
+          byCard.set(card.value, {
+            cardName: card.label,
+            totalAmount: 0,
+            paidAmount: 0,
+            pendingAmount: 0,
+            revolvingAmount: 0,
+            transactionCount: 0,
+          });
+        });
+
+        monthTransactions.forEach((t) => {
+          if (!t.cardId) return;
+          const summary = byCard.get(t.cardId) || {
+            cardName: t.cardName || 'Cartão',
+            totalAmount: 0,
+            paidAmount: 0,
+            pendingAmount: 0,
+            revolvingAmount: 0,
+            transactionCount: 0,
+          };
+          const amount = Number(t.amount || 0);
+          summary.totalAmount += amount;
+          summary.transactionCount += 1;
+          if (t.paid) summary.paidAmount += amount;
+          else summary.pendingAmount += amount;
+          if (t.origin === 'revolving') summary.revolvingAmount += amount;
+          byCard.set(t.cardId, summary);
+        });
+
+        const batch = writeBatch(db);
+        byCard.forEach((summary, cardId) => {
+          const card = myCards.find((c) => c.value === cardId);
+          const closingDay = Number(card?.day || 1);
+          const monthEndDay = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate();
+          const closeDate = new Date(
+            currentDate.getFullYear(),
+            currentDate.getMonth(),
+            Math.min(Math.max(closingDay, 1), monthEndDay),
+            23,
+            59,
+            59,
+            999
+          );
+          const isClosed = new Date() > closeDate;
+          const invoiceId = `${user.uid}_${cardId}_${monthKey}`;
+          batch.set(
+            doc(db, 'invoices', invoiceId),
+            {
+              userId: user.uid,
+              cardId,
+              cardName: summary.cardName,
+              monthKey,
+              totalAmount: parseFloat(summary.totalAmount.toFixed(2)),
+              paidAmount: parseFloat(summary.paidAmount.toFixed(2)),
+              pendingAmount: parseFloat(summary.pendingAmount.toFixed(2)),
+              revolvingAmount: parseFloat(summary.revolvingAmount.toFixed(2)),
+              transactionCount: summary.transactionCount,
+              isClosed,
+              closedAt: isClosed ? Timestamp.fromDate(closeDate) : null,
+              updatedAt: Timestamp.now(),
+            },
+            { merge: true }
+          );
+        });
+
+        await batch.commit();
+      } catch (error: any) {
+        if (error?.code === 'permission-denied') {
+          console.warn('Invoice snapshot sync skipped: missing Firestore permission for invoices.');
+          return;
+        }
+        console.error('Invoice snapshot sync error:', error);
+      }
+    };
+
+    syncInvoices();
+  }, [user, myCards, monthTransactions, currentDate]);
+
+  // Lembretes inteligentes: vencimento e limite baixo
+  useEffect(() => {
+    if (!user || Platform.OS === 'web' || myCards.length === 0) return;
+
+    const scheduleReminders = async () => {
+      try {
+        const existing = await Notifications.getPermissionsAsync();
+        let finalStatus = existing.status;
+        if (finalStatus !== 'granted') {
+          const requested = await Notifications.requestPermissionsAsync();
+          finalStatus = requested.status;
+        }
+        if (finalStatus !== 'granted') return;
+
+        const monthKey = new Date().toISOString().slice(0, 7);
+        const signature = myCards
+          .map((c) => `${c.value}:${Number(c.dueDay ?? c.day)}:${Number(c.availableLimit || 0)}:${Number(c.totalLimit || 0)}`)
+          .join('|');
+        const syncKey = `reminders-sync:${user.uid}:${monthKey}`;
+        const previousSignature = await AsyncStorage.getItem(syncKey);
+        if (previousSignature === signature) return;
+
+        const idsKey = `reminder-ids:${user.uid}`;
+        const oldIdsRaw = await AsyncStorage.getItem(idsKey);
+        if (oldIdsRaw) {
+          const oldIds = JSON.parse(oldIdsRaw) as string[];
+          await Promise.all(oldIds.map((id) => Notifications.cancelScheduledNotificationAsync(id).catch(() => null)));
+        }
+
+        const nextIds: string[] = [];
+        for (const card of myCards) {
+          const dueDay = Number(card.dueDay ?? card.day);
+          if (Number.isFinite(dueDay) && dueDay > 0) {
+            const preDay = dueDay - 3;
+            if (preDay > 0) {
+              const preDate = getNextDateByDay(preDay, 9);
+              const preId = await Notifications.scheduleNotificationAsync({
+                content: {
+                  title: 'Fatura próxima do vencimento',
+                  body: `${card.label}: vence em 3 dias.`,
+                },
+                trigger: {
+                  type: Notifications.SchedulableTriggerInputTypes.DATE,
+                  date: preDate,
+                },
+              });
+              nextIds.push(preId);
+            }
+
+            const dueDate = getNextDateByDay(dueDay, 9);
+            const dueId = await Notifications.scheduleNotificationAsync({
+              content: {
+                title: 'Fatura vence hoje',
+                body: `${card.label}: vencimento da fatura.`,
+              },
+              trigger: {
+                type: Notifications.SchedulableTriggerInputTypes.DATE,
+                date: dueDate,
+              },
+            });
+            nextIds.push(dueId);
+          }
+
+          const totalLimit = Number(card.totalLimit || 0);
+          const availableLimit = Number(card.availableLimit || 0);
+          if (totalLimit > 0 && availableLimit / totalLimit <= 0.15) {
+            const lowLimitKey = `low-limit:${user.uid}:${card.value}:${monthKey}`;
+            const alreadyNotified = await AsyncStorage.getItem(lowLimitKey);
+            if (!alreadyNotified) {
+              await Notifications.scheduleNotificationAsync({
+                content: {
+                  title: 'Limite do cartão baixo',
+                  body: `${card.label}: limite disponível abaixo de 15%.`,
+                },
+                trigger: null,
+              });
+              await AsyncStorage.setItem(lowLimitKey, '1');
+            }
+          }
+        }
+
+        await AsyncStorage.setItem(idsKey, JSON.stringify(nextIds));
+        await AsyncStorage.setItem(syncKey, signature);
+      } catch (error) {
+        console.error('Reminder scheduling error:', error);
+      }
+    };
+
+    scheduleReminders();
+  }, [user, myCards]);
 
   const changeMonth = (direction: number) => {
     const newDate = new Date(currentDate);
@@ -333,7 +668,13 @@ export default function DashboardScreen() {
       const cardObj = myCards.find((c) => c.value === cardId);
       if (!cardObj) return;
 
-      const cardTransactions = filteredTransactions.filter((t) => t.cardId === cardId && !t.paid);
+      const cardTransactions = filteredTransactions
+        .filter((t) => t.cardId === cardId && !t.paid)
+        .sort((a, b) => {
+          const aMs = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0;
+          const bMs = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
+          return aMs - bMs;
+        });
       const totalDue = cardTransactions.reduce((acc, t) => acc + (t.amount || 0), 0);
 
       if (totalDue === 0) return Alert.alert('Aviso', 'Não há faturas pendentes para este cartão neste mês.');
@@ -341,7 +682,9 @@ export default function DashboardScreen() {
       await runTransaction(db, async (tx) => {
         const cardRef = doc(db, 'cards', cardId);
         const txRefs = cardTransactions.map((t) => doc(db, 'transactions', t.id));
-        const personIds = Array.from(new Set(cardTransactions.map((t) => t.personId).filter(Boolean)));
+        const personIds = Array.from(
+          new Set(cardTransactions.map((t) => t.personId).filter((pid) => Boolean(pid) && !isOwnerPersonId(pid)))
+        );
         const personRefs = personIds.map((id) => doc(db, 'people', id));
 
         // READS
@@ -353,71 +696,102 @@ export default function DashboardScreen() {
 
         if (!cardSnap.exists()) throw new Error('Cartão não encontrado');
 
+        const effectivePaid = Math.min(Number(amountPaid || 0), totalDue);
+
         // atualiza limite
         const currentAvailable = Number(cardSnap.data().availableLimit || 0);
         const maxLimit = Number(cardSnap.data().limit ?? cardSnap.data().creditLimit ?? cardSnap.data().totalLimit ?? NaN);
-        let newAvailable = currentAvailable + Number(amountPaid || 0);
+        let newAvailable = currentAvailable + effectivePaid;
         newAvailable = Math.max(0, newAvailable);
         if (!Number.isNaN(maxLimit)) newAvailable = Math.min(newAvailable, maxLimit);
         tx.update(cardRef, { availableLimit: newAvailable });
 
-        // pagamento parcial: cria resíduo pro mês seguinte
-        if (amountPaid < totalDue) {
-          const remaining = totalDue - amountPaid;
-          const interest = remaining * REVOLVING_INTEREST;
-          const nextMonthDate = new Date(currentDate);
-          nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
-          const newRef = doc(collection(db, 'transactions'));
-          tx.set(newRef, {
-            userId: user?.uid,
-            description: `Resíduo + Encargos (${cardObj.label})`,
-            category: 'Outros',
-            amount: parseFloat((remaining + interest).toFixed(2)),
-            cardId,
-            cardName: cardObj.label,
-            personId: user?.uid,
-            personName: user?.displayName || 'Eu (Titular)',
-            createdAt: Timestamp.fromDate(nextMonthDate),
-            paid: false,
-            installments: null,
-          });
-        }
-
-        // agrega por pessoa
         const reduceByPerson = new Map<string, number>();
+        const interestByPerson = new Map<string, number>();
+        const unpaidRolloverByPerson = new Map<string, { principal: number; personName: string }>();
+        let remainingToApply = effectivePaid;
+
+        // aplica pagamento de forma progressiva: quita total e, se necessário, parcial da próxima transação
         for (let i = 0; i < txRefs.length; i++) {
           const snap = txSnaps[i];
+          const tRef = txRefs[i];
           if (!snap || !snap.exists()) continue;
           const data: any = snap.data();
           if (data.paid) continue;
+
           const pid = data.personId;
-          if (!pid) continue;
+          const personName = data.personName || 'Pessoa';
           const amt = Number(data.amount || 0);
-          reduceByPerson.set(pid, (reduceByPerson.get(pid) || 0) + amt);
+          if (amt <= 0) continue;
+
+          const applied = Math.min(amt, remainingToApply);
+          const remainingAmount = parseFloat((amt - applied).toFixed(2));
+          remainingToApply = parseFloat((remainingToApply - applied).toFixed(2));
+
+          if (pid && !isOwnerPersonId(pid)) {
+            reduceByPerson.set(pid, (reduceByPerson.get(pid) || 0) + applied);
+          }
+
+          if (remainingAmount <= 0.000001) {
+            tx.update(tRef, { paid: true });
+          } else {
+            const previous = unpaidRolloverByPerson.get(pid || '');
+            unpaidRolloverByPerson.set(pid || '', {
+              principal: (previous?.principal || 0) + remainingAmount,
+              personName: previous?.personName || personName,
+            });
+            tx.update(tRef, { paid: true });
+          }
+        }
+
+        // no pagamento parcial, rola o saldo remanescente para o próximo mês com juros por pessoa
+        if (effectivePaid < totalDue) {
+          const nextMonthDate = new Date(currentDate);
+          nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
+
+          unpaidRolloverByPerson.forEach((entry, pid) => {
+            const principal = parseFloat(entry.principal.toFixed(2));
+            if (principal <= 0) return;
+
+            const interest = parseFloat((principal * REVOLVING_INTEREST).toFixed(2));
+            interestByPerson.set(pid, (interestByPerson.get(pid) || 0) + interest);
+
+            const newRef = doc(collection(db, 'transactions'));
+            tx.set(newRef, {
+              userId: user?.uid,
+              description: `Rotativo (${cardObj.label})`,
+              category: 'Outros',
+              amount: parseFloat((principal + interest).toFixed(2)),
+              cardId,
+              cardName: cardObj.label,
+              personId: pid || user?.uid,
+              personName: entry.personName,
+              createdAt: Timestamp.fromDate(nextMonthDate),
+              paid: false,
+              origin: 'revolving',
+              installments: null,
+            });
+          });
         }
 
         // atualiza saldo da pessoa
         for (let i = 0; i < personIds.length; i++) {
-          const pid = personIds[i];
-          const amountToReduce = reduceByPerson.get(pid) || 0;
-          if (amountToReduce === 0) continue;
+          const personId = personIds[i];
+          const amountToReduce = reduceByPerson.get(personId) || 0;
+          const interestToAdd = interestByPerson.get(personId) || 0;
+          if (amountToReduce === 0 && interestToAdd === 0) continue;
           const pSnap = personSnaps[i];
           if (!pSnap || !pSnap.exists()) continue;
           const currentBalance = Number(pSnap.data().currentBalance || 0);
-          tx.update(personRefs[i], { currentBalance: currentBalance - amountToReduce });
-        }
-
-        // marca transações como pagas
-        for (let i = 0; i < txRefs.length; i++) {
-          const tRef = txRefs[i];
-          const tSnap = txSnaps[i];
-          if (!tSnap || !tSnap.exists()) continue;
-          if (!tSnap.data().paid) tx.update(tRef, { paid: true });
+          tx.update(personRefs[i], { currentBalance: currentBalance - amountToReduce + interestToAdd });
         }
       });
 
       if (amountPaid < totalDue) {
-        Alert.alert('Atenção', 'Fatura paga parcialmente. O saldo restante com juros foi lançado na próxima fatura.');
+        Alert.alert(
+          'Atenção',
+          'Pagamento parcial aplicado. O saldo restante foi rolado para o próximo mês com juros rotativos.'
+        );
       } else {
         Alert.alert('Sucesso', 'Fatura quitada totalmente!');
       }
@@ -449,7 +823,7 @@ export default function DashboardScreen() {
         const personId = transSnap.data().personId;
 
         const cardRef = cardId ? doc(db, 'cards', cardId) : null;
-        const personRef = personId ? doc(db, 'people', personId) : null;
+        const personRef = personId && !isOwnerPersonId(personId) ? doc(db, 'people', personId) : null;
 
         const cardSnap = cardRef ? await tx.get(cardRef) : null;
         const personSnap = personRef ? await tx.get(personRef) : null;
@@ -497,7 +871,7 @@ export default function DashboardScreen() {
               const wasPaid = Boolean(transData.paid);
 
               const cardRef = idDoCartao ? doc(db, 'cards', idDoCartao) : null;
-              const personRef = idDaPessoa ? doc(db, 'people', idDaPessoa) : null;
+              const personRef = idDaPessoa && !isOwnerPersonId(idDaPessoa) ? doc(db, 'people', idDaPessoa) : null;
 
               const cardSnap = cardRef ? await tx.get(cardRef) : null;
               const personSnap = personRef ? await tx.get(personRef) : null;
@@ -570,29 +944,75 @@ export default function DashboardScreen() {
           const oldSnap = await tx.get(transRef);
           if (!oldSnap.exists()) throw new Error('Transação não encontrada');
 
-          const oldAmount = oldSnap.data().amount || 0;
+          const oldAmount = Number(oldSnap.data().amount || 0);
           const oldPaid = Boolean(oldSnap.data().paid);
+          const oldCardId = oldSnap.data().cardId ? String(oldSnap.data().cardId) : '';
+          const oldPersonId = oldSnap.data().personId ? String(oldSnap.data().personId) : '';
           const diff = rawValue - oldAmount;
 
-          const cardRef = selectedCard ? doc(db, 'cards', selectedCard) : null;
-          const personRef = selectedPerson ? doc(db, 'people', selectedPerson) : null;
+          if (!oldPaid) {
+            const sameCard = oldCardId === selectedCard;
+            const oldCardRef = oldCardId ? doc(db, 'cards', oldCardId) : null;
+            const newCardRef = selectedCard ? doc(db, 'cards', selectedCard) : null;
+            const oldCardSnap = oldCardRef ? await tx.get(oldCardRef) : null;
+            const newCardSnap = newCardRef ? await tx.get(newCardRef) : null;
 
-          const cardSnap = cardRef ? await tx.get(cardRef) : null;
-          const personSnap = personRef ? await tx.get(personRef) : null;
+            const applyCardDelta = (
+              cardRef: ReturnType<typeof doc> | null,
+              cardSnap: any,
+              delta: number
+            ) => {
+              if (!cardRef || !cardSnap || !cardSnap.exists()) return;
+              const currentAvailable = Number(cardSnap.data().availableLimit || 0);
+              const maxLimit = Number(
+                cardSnap.data().limit ?? cardSnap.data().creditLimit ?? cardSnap.data().totalLimit ?? NaN
+              );
+              let nextAvailable = currentAvailable + delta;
+              nextAvailable = Math.max(0, nextAvailable);
+              if (!Number.isNaN(maxLimit)) nextAvailable = Math.min(nextAvailable, maxLimit);
+              tx.update(cardRef, { availableLimit: nextAvailable });
+            };
 
-          const currentAvailable = cardSnap && cardSnap.exists() ? cardSnap.data().availableLimit || 0 : 0;
-          const currentPersonBalance = personSnap && personSnap.exists() ? personSnap.data().currentBalance || 0 : 0;
+            if (sameCard) {
+              if (diff > 0) {
+                const available = Number(newCardSnap?.data()?.availableLimit || 0);
+                if (diff > available) throw new Error('Limite insuficiente para aumentar essa despesa.');
+              }
+              applyCardDelta(newCardRef, newCardSnap, -diff);
+            } else {
+              const newCardAvailable = Number(newCardSnap?.data()?.availableLimit || 0);
+              if (rawValue > newCardAvailable) throw new Error('Limite insuficiente no novo cartão.');
+              applyCardDelta(oldCardRef, oldCardSnap, oldAmount);
+              applyCardDelta(newCardRef, newCardSnap, -rawValue);
+            }
 
-          if (cardRef && cardSnap && cardSnap.exists()) {
-            const maxLimit = Number(cardSnap.data().limit ?? cardSnap.data().creditLimit ?? cardSnap.data().totalLimit ?? NaN);
-            let newAvailableCard = Number(currentAvailable) - Number(diff || 0);
-            newAvailableCard = Math.max(0, newAvailableCard);
-            if (!Number.isNaN(maxLimit)) newAvailableCard = Math.min(newAvailableCard, maxLimit);
-            tx.update(cardRef, { availableLimit: newAvailableCard });
-          }
+            const samePerson = oldPersonId === selectedPerson;
+            const oldPersonRef = oldPersonId && !isOwnerPersonId(oldPersonId) ? doc(db, 'people', oldPersonId) : null;
+            const newPersonRef =
+              selectedPerson && !isOwnerPersonId(selectedPerson) ? doc(db, 'people', selectedPerson) : null;
+            const oldPersonSnap = oldPersonRef ? await tx.get(oldPersonRef) : null;
+            const newPersonSnap = newPersonRef ? await tx.get(newPersonRef) : null;
 
-          if (personRef && personSnap && personSnap.exists() && !oldPaid) {
-            tx.update(personRef, { currentBalance: currentPersonBalance + diff });
+            const applyPersonDelta = (
+              personRef: ReturnType<typeof doc> | null,
+              personSnap: any,
+              delta: number
+            ) => {
+              if (!personRef) return;
+              if (personSnap && personSnap.exists()) {
+                const currentBalance = Number(personSnap.data().currentBalance || 0);
+                tx.update(personRef, { currentBalance: currentBalance + delta });
+              } else {
+                tx.set(personRef, { currentBalance: delta }, { merge: true });
+              }
+            };
+
+            if (samePerson) {
+              applyPersonDelta(newPersonRef, newPersonSnap, diff);
+            } else {
+              applyPersonDelta(oldPersonRef, oldPersonSnap, -oldAmount);
+              applyPersonDelta(newPersonRef, newPersonSnap, rawValue);
+            }
           }
 
           tx.update(transRef, {
@@ -619,7 +1039,7 @@ export default function DashboardScreen() {
 
       await runTransaction(db, async (tx) => {
         const cardRef = selectedCard ? doc(db, 'cards', selectedCard) : null;
-        const personRef = selectedPerson ? doc(db, 'people', selectedPerson) : null;
+        const personRef = selectedPerson && !isOwnerPersonId(selectedPerson) ? doc(db, 'people', selectedPerson) : null;
 
         const cardSnap = cardRef ? await tx.get(cardRef) : null;
         const personSnap = personRef ? await tx.get(personRef) : null;
@@ -630,6 +1050,9 @@ export default function DashboardScreen() {
         const currentPersonBalance = personSnap && personSnap.exists() ? personSnap.data().currentBalance || 0 : 0;
 
         if (cardRef) {
+          if (rawValue > Number(currentAvailable || 0)) {
+            throw new Error('Limite insuficiente para essa compra.');
+          }
           const maxLimit = Number(cardSnap?.data()?.limit ?? cardSnap?.data()?.creditLimit ?? cardSnap?.data()?.totalLimit ?? NaN);
           let newAvailable = Number(currentAvailable) - Number(rawValue || 0);
           newAvailable = Math.max(0, newAvailable);
@@ -661,6 +1084,7 @@ export default function DashboardScreen() {
             personName: personObj?.label || '?',
             createdAt: Timestamp.fromDate(transactionDate),
             paid: false,
+            origin: 'purchase',
             installments: isInstallment && totalInstallments > 1 ? `${i + 1}/${totalInstallments}` : null,
           });
         }
@@ -683,6 +1107,113 @@ export default function DashboardScreen() {
     await setDoc(doc(db, 'user_prefs', user.uid), { salary: val }, { merge: true });
     setSalary(val);
     setSalaryModalVisible(false);
+  }
+
+  function resetTrialForm() {
+    setTrialName('');
+    setTrialCardId(myCards[0]?.value || '');
+    setTrialEndDateText(new Date().toLocaleDateString('pt-BR'));
+    setTrialNotifyDays('1');
+  }
+
+  async function handleSaveTrialSubscription() {
+    if (!user) return;
+    if (!trialName.trim() || !trialCardId || !trialEndDateText.trim()) {
+      return Alert.alert('Erro', 'Preencha nome, cartão e data final.');
+    }
+
+    const notifyDaysBefore = parseInt(trialNotifyDays, 10);
+    if (!Number.isFinite(notifyDaysBefore) || notifyDaysBefore <= 0) {
+      return Alert.alert('Erro', 'Dias antes deve ser maior que zero.');
+    }
+
+    const endDate = parsePtBrDate(trialEndDateText.trim());
+    if (!endDate) return Alert.alert('Erro', 'Data inválida. Use DD/MM/AAAA.');
+
+    const card = myCards.find((c) => c.value === trialCardId);
+    if (!card) return Alert.alert('Erro', 'Cartão inválido.');
+
+    setIsSavingTrial(true);
+    try {
+      const permissions = await Notifications.getPermissionsAsync();
+      let finalStatus = permissions.status;
+      if (finalStatus !== 'granted') {
+        const requested = await Notifications.requestPermissionsAsync();
+        finalStatus = requested.status;
+      }
+
+      const reminderDate = getTrialReminderDate(endDate, notifyDaysBefore);
+      let notificationId: string | null = null;
+
+      if (finalStatus === 'granted') {
+        if (reminderDate > new Date()) {
+          notificationId = await Notifications.scheduleNotificationAsync({
+            content: {
+              title: 'Assinatura grátis acabando',
+              body: `${trialName.trim()} será cobrada em ${notifyDaysBefore} dia(s).`,
+            },
+            trigger: {
+              type: Notifications.SchedulableTriggerInputTypes.DATE,
+              date: reminderDate,
+            },
+          });
+        } else {
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: 'Assinatura grátis acabando',
+              body: `${trialName.trim()} pode cobrar hoje. Revise ou cancele.`,
+            },
+            trigger: null,
+          });
+        }
+      }
+
+      await addDoc(collection(db, 'trial_subscriptions'), {
+        userId: user.uid,
+        name: trialName.trim(),
+        cardId: card.value,
+        cardName: card.label,
+        endDate: Timestamp.fromDate(new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate(), 23, 59, 59, 999)),
+        notifyDaysBefore,
+        notificationId,
+        createdAt: Timestamp.now(),
+      });
+
+      setTrialModalVisible(false);
+      resetTrialForm();
+      Alert.alert('Sucesso', 'Assinatura temporária adicionada.');
+    } catch (error: any) {
+      if (error?.code === 'permission-denied') {
+        console.warn('Save trial subscription skipped: missing Firestore permission.');
+        Alert.alert('Permissão', 'Sem permissão para salvar assinatura temporária. Atualize as regras do Firestore.');
+        return;
+      }
+      console.error('Save trial subscription error:', error);
+      Alert.alert('Erro', 'Não foi possível salvar a assinatura temporária.');
+    } finally {
+      setIsSavingTrial(false);
+    }
+  }
+
+  async function handleDeleteTrialSubscription(item: TrialSubscription) {
+    Alert.alert('Excluir', `Remover "${item.name}"?`, [
+      { text: 'Cancelar', style: 'cancel' },
+      {
+        text: 'Excluir',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            if (item.notificationId) {
+              await Notifications.cancelScheduledNotificationAsync(item.notificationId).catch(() => null);
+            }
+            await deleteDoc(doc(db, 'trial_subscriptions', item.id));
+          } catch (error) {
+            console.error('Delete trial subscription error:', error);
+            Alert.alert('Erro', 'Não foi possível remover.');
+          }
+        },
+      },
+    ]);
   }
 
   // Immersive Android
@@ -1057,12 +1588,108 @@ export default function DashboardScreen() {
               <Text style={styles.menuItemText}>Definir Salário</Text>
             </TouchableOpacity>
 
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={() => {
+                setMenuVisible(false);
+                resetTrialForm();
+                setTrialModalVisible(true);
+              }}
+            >
+              <Ionicons name="timer-outline" size={22} color="#FFF" />
+              <Text style={styles.menuItemText}>Assinaturas Temporárias</Text>
+            </TouchableOpacity>
+
             <TouchableOpacity style={[styles.menuItem, { borderBottomWidth: 0 }]} onPress={handleLogout}>
               <Ionicons name="log-out-outline" size={22} color="#EF4444" />
               <Text style={[styles.menuItemText, { color: '#EF4444' }]}>Sair do App</Text>
             </TouchableOpacity>
           </View>
         </TouchableOpacity>
+      </Modal>
+
+      {/* MODAL ASSINATURAS TEMPORÁRIAS */}
+      <Modal visible={trialModalVisible} transparent animationType="fade">
+        <View style={styles.alertOverlay}>
+          <View style={styles.alertBox}>
+            <Text style={styles.alertTitle}>Assinaturas Temporárias</Text>
+
+            <View style={{ width: '100%' }}>
+              <Text style={styles.label}>Nome do Serviço</Text>
+              <TextInput
+                style={styles.input}
+                value={trialName}
+                onChangeText={setTrialName}
+                placeholder="Ex: Netflix grátis"
+                placeholderTextColor="#64748b"
+              />
+            </View>
+
+            <View style={{ width: '100%', marginTop: 12 }}>
+              <SmartPicker
+                label="Cartão"
+                items={myCards}
+                selectedValue={trialCardId}
+                onValueChange={(v) => setTrialCardId(v || '')}
+                placeholder="Selecione o cartão"
+                fullWidth
+              />
+            </View>
+
+            <View style={{ width: '100%', marginTop: 12 }}>
+              <Text style={styles.label}>Fim do Período Grátis</Text>
+              <TextInputMask
+                type={'datetime'}
+                options={{ format: 'DD/MM/YYYY' }}
+                style={styles.input}
+                value={trialEndDateText}
+                onChangeText={setTrialEndDateText}
+              />
+            </View>
+
+            <View style={{ width: '100%', marginTop: 12 }}>
+              <Text style={styles.label}>Avisar Quantos Dias Antes</Text>
+              <TextInput
+                style={styles.input}
+                keyboardType="numeric"
+                value={trialNotifyDays}
+                onChangeText={setTrialNotifyDays}
+              />
+            </View>
+
+            <TouchableOpacity style={[styles.saveButton, isSavingTrial && { opacity: 0.7 }]} onPress={handleSaveTrialSubscription} disabled={isSavingTrial}>
+              <Text style={styles.saveButtonText}>{isSavingTrial ? 'SALVANDO...' : 'Adicionar'}</Text>
+            </TouchableOpacity>
+
+            <ScrollView style={{ width: '100%', maxHeight: 220, marginTop: 14 }}>
+              {trialSubscriptions.length === 0 ? (
+                <Text style={styles.alertText}>Nenhuma assinatura temporária cadastrada.</Text>
+              ) : (
+                trialSubscriptions.map((item) => {
+                  const endDate = item.endDate?.toDate ? item.endDate.toDate() : null;
+                  return (
+                    <View key={item.id} style={styles.trialItem}>
+                      <View style={{ flex: 1, marginRight: 8 }}>
+                        <Text style={styles.trialTitle}>{item.name}</Text>
+                        <Text style={styles.trialSubtitle}>
+                          {item.cardName} • fim {endDate ? toPtBrDate(endDate) : '--'}
+                        </Text>
+                        <Text style={styles.trialSubtitle}>Aviso: {item.notifyDaysBefore} dia(s) antes</Text>
+                      </View>
+                      <TouchableOpacity onPress={() => handleDeleteTrialSubscription(item)} style={styles.actionButton}>
+                        <Ionicons name="trash-outline" size={20} color="#EF4444" />
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })
+              )}
+            </ScrollView>
+
+            <TouchableOpacity onPress={() => setTrialModalVisible(false)} style={{ marginTop: 15 }}>
+              <Text style={{ color: '#94a3b8' }}>Fechar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       </Modal>
 
       {/* MODAL SALÁRIO */}
@@ -1259,6 +1886,18 @@ const styles = StyleSheet.create({
   alertText: { fontSize: 16, color: '#cbd5e1', marginBottom: 15, textAlign: 'center' },
   alertButton: { backgroundColor: '#EF4444', paddingVertical: 12, paddingHorizontal: 30, borderRadius: 10, width: '100%', alignItems: 'center' },
   alertButtonText: { color: '#FFF', fontWeight: 'bold' },
+  trialItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0f172a',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 12,
+    marginBottom: 10,
+  },
+  trialTitle: { color: '#FFF', fontWeight: '700', fontSize: 14, marginBottom: 4 },
+  trialSubtitle: { color: '#94a3b8', fontSize: 12 },
 
   salaryInput: { backgroundColor: '#0f172a', color: '#FFF', fontSize: 24, padding: 15, width: '100%', textAlign: 'center', borderRadius: 12, marginBottom: 15, borderWidth: 1, borderColor: '#334155' },
 
