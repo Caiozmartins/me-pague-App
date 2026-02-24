@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useContext } from 'react';
 import { 
   View, Text, StyleSheet, TouchableOpacity, 
-  FlatList, Modal, TextInput, Alert, ActivityIndicator 
+  FlatList, Modal, TextInput, Alert, ActivityIndicator, Linking
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { collection, query, where, onSnapshot, addDoc, deleteDoc, doc, updateDoc, getDocs, limit } from 'firebase/firestore';
@@ -19,6 +19,7 @@ export default function PeopleListScreen({ navigation }: Props) {
   const [loading, setLoading] = useState(true);
   const [modalVisible, setModalVisible] = useState(false);
   const [name, setName] = useState('');
+  const [phone, setPhone] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -47,11 +48,12 @@ export default function PeopleListScreen({ navigation }: Props) {
     
     try {
       if (editingId) {
-        await updateDoc(doc(db, "people", editingId), { name: name.trim() });
+        await updateDoc(doc(db, "people", editingId), { name: name.trim(), phone: phone.trim() || null });
       } else {
         await addDoc(collection(db, "people"), {
           userId: user?.uid,
           name: name.trim(),
+          phone: phone.trim() || null,
           currentBalance: 0,
           createdAt: new Date().toISOString()
         });
@@ -65,7 +67,66 @@ export default function PeopleListScreen({ navigation }: Props) {
   function handleEdit(person: Person) {
     setEditingId(person.id);
     setName(person.name);
+    setPhone(String(person.phone || ''));
     setModalVisible(true);
+  }
+
+  const normalizePhoneForWhatsApp = (value?: string) => {
+    const digits = String(value || '').replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.startsWith('00')) return digits.slice(2);
+    if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+    return digits;
+  };
+
+  async function handleSendWhatsApp(person: Person) {
+    try {
+      const phoneDigits = normalizePhoneForWhatsApp(person.phone);
+      if (!phoneDigits) {
+        Alert.alert('WhatsApp', 'Cadastre o número dessa pessoa para enviar cobrança.');
+        return;
+      }
+
+      const txSnap = await getDocs(query(collection(db, 'transactions'), where('userId', '==', user?.uid)));
+      const personTransactions = txSnap.docs
+        .map((docItem) => ({ id: docItem.id, ...(docItem.data() as any) }))
+        .filter((t: any) => String(t.personId || '') === person.id);
+      const debtItems = personTransactions.filter((t: any) => !Boolean(t.paid));
+      const sourceItems = debtItems.length > 0 ? debtItems : personTransactions;
+      const previewItems = sourceItems.slice(0, 10);
+      const itemsText =
+        previewItems.length > 0
+          ? previewItems
+              .map((t: any) => {
+                const dateObj = t.createdAt?.toDate ? t.createdAt.toDate() : new Date();
+                const dateLabel = dateObj.toLocaleDateString('pt-BR');
+                return `- ${t.description || 'Compra'} (${dateLabel})`;
+              })
+              .join('\n')
+          : '- Sem itens detalhados';
+      const moreCount = sourceItems.length - previewItems.length;
+
+      const message =
+        `Olá, ${person.name}! Tudo bem?\n` +
+        `Sua conta atual está em R$ ${Number(person.currentBalance || 0).toFixed(2)}.\n` +
+        `Itens:\n${itemsText}\n` +
+        (moreCount > 0 ? `... e mais ${moreCount} item(ns).\n` : '') +
+        'Quando puder, me faz o pagamento, por favor.';
+      const encodedMessage = encodeURIComponent(message);
+      const nativeUrl = `whatsapp://send?phone=${phoneDigits}&text=${encodedMessage}`;
+      const fallbackUrl = `https://wa.me/${phoneDigits}?text=${encodedMessage}`;
+
+      const canOpenNative = await Linking.canOpenURL(nativeUrl);
+      if (canOpenNative) {
+        await Linking.openURL(nativeUrl);
+        return;
+      }
+
+      await Linking.openURL(fallbackUrl);
+    } catch (error) {
+      console.warn('WhatsApp open warning:', error);
+      Alert.alert('WhatsApp', 'Não foi possível abrir o WhatsApp agora.');
+    }
   }
 
   async function handleDelete(id: string) {
@@ -101,6 +162,7 @@ export default function PeopleListScreen({ navigation }: Props) {
     setModalVisible(false);
     setEditingId(null);
     setName('');
+    setPhone('');
   };
 
   return (
@@ -121,25 +183,48 @@ export default function PeopleListScreen({ navigation }: Props) {
         <FlatList
           data={people}
           keyExtractor={item => item.id}
-          contentContainerStyle={{ padding: 20 }}
+          contentContainerStyle={{ padding: 20, paddingBottom: 40, flexGrow: 1 }}
+          ListEmptyComponent={
+            <View style={styles.emptyState}>
+              <View style={styles.emptyIconShell}>
+                <Ionicons name="people-outline" size={40} color="#93c5fd" />
+                <View style={styles.emptySpark}>
+                  <Ionicons name="add" size={12} color="#0f172a" />
+                </View>
+              </View>
+              <Text style={styles.emptyTitle}>Ainda não adicionaste nenhuma pessoa</Text>
+              <Text style={styles.emptyDescription}>
+                Regista quem participa nas despesas para acompanhar saldos e dividir valores com clareza.
+              </Text>
+              <TouchableOpacity style={styles.emptyCta} onPress={() => setModalVisible(true)}>
+                <Ionicons name="person-add" size={16} color="#0f172a" />
+                <Text style={styles.emptyCtaText}>Adicionar agora</Text>
+              </TouchableOpacity>
+            </View>
+          }
           renderItem={({ item }) => (
-            <TouchableOpacity 
-              style={styles.personCard}
-              onPress={() => navigation.navigate('PersonDetail', { personId: item.id, personName: item.name })}
-            >
+            <View style={styles.personCard}>
               <View style={styles.avatar}>
                 <Text style={styles.avatarText}>{item.name.charAt(0).toUpperCase()}</Text>
               </View>
               
-              <View style={{ flex: 1 }}>
+              <TouchableOpacity
+                style={{ flex: 1 }}
+                activeOpacity={0.8}
+                onPress={() => navigation.navigate('PersonDetail', { personId: item.id, personName: item.name })}
+              >
                 <Text style={styles.personName}>{item.name}</Text>
                 <Text style={styles.balanceLabel}>Saldo atual</Text>
                 <Text style={[styles.balanceValue, { color: item.currentBalance > 0 ? '#EF4444' : '#10B981' }]}>
                   R$ {item.currentBalance?.toFixed(2) || "0.00"}
                 </Text>
-              </View>
+                {!!item.phone && <Text style={styles.phoneText}>WhatsApp: {item.phone}</Text>}
+              </TouchableOpacity>
 
               <View style={styles.actions}>
+                <TouchableOpacity onPress={() => handleSendWhatsApp(item)} style={styles.actionBtn}>
+                  <Ionicons name="logo-whatsapp" size={18} color="#22c55e" />
+                </TouchableOpacity>
                 <TouchableOpacity onPress={() => handleEdit(item)} style={styles.actionBtn}>
                   <Ionicons name="pencil" size={18} color="#3B82F6" />
                 </TouchableOpacity>
@@ -147,7 +232,7 @@ export default function PeopleListScreen({ navigation }: Props) {
                   <Ionicons name="trash" size={18} color="#EF4444" />
                 </TouchableOpacity>
               </View>
-            </TouchableOpacity>
+            </View>
           )}
         />
       )}
@@ -164,6 +249,14 @@ export default function PeopleListScreen({ navigation }: Props) {
               value={name}
               onChangeText={setName}
               autoFocus
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="WhatsApp (com DDD)"
+              placeholderTextColor="#64748b"
+              value={phone}
+              onChangeText={setPhone}
+              keyboardType="phone-pad"
             />
             <View style={styles.modalButtons}>
               <TouchableOpacity style={[styles.btn, styles.btnCancel]} onPress={closeModal}>
@@ -194,7 +287,49 @@ const styles = StyleSheet.create({
   avatarText: { color: '#FFF', fontSize: 20, fontWeight: 'bold' },
   personName: { color: '#FFF', fontSize: 18, fontWeight: 'bold', marginBottom: 4 },
   balanceLabel: { color: '#94a3b8', fontSize: 12 },
-  balanceValue: { fontSize: 16, fontWeight: 'bold' },
+  balanceValue: { fontSize: 16, fontWeight: 'bold', fontVariant: ['tabular-nums'] },
+  phoneText: { color: '#64748b', fontSize: 11, marginTop: 4 },
+  emptyState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    marginTop: 20,
+  },
+  emptyIconShell: {
+    width: 84,
+    height: 84,
+    borderRadius: 42,
+    backgroundColor: 'rgba(59,130,246,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(59,130,246,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  emptySpark: {
+    position: 'absolute',
+    right: 4,
+    bottom: 6,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#93c5fd',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyTitle: { color: '#f8fafc', fontSize: 20, fontWeight: '700', textAlign: 'center', marginBottom: 10 },
+  emptyDescription: { color: '#94a3b8', fontSize: 14, textAlign: 'center', lineHeight: 20, maxWidth: 320, marginBottom: 18 },
+  emptyCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#93c5fd',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 12,
+  },
+  emptyCtaText: { color: '#0f172a', fontWeight: '700' },
   actions: { flexDirection: 'row', gap: 10 },
   actionBtn: { padding: 8, backgroundColor: '#0f172a', borderRadius: 8 },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', padding: 24 },

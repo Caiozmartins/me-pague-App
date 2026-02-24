@@ -31,7 +31,6 @@ import {
   orderBy,
   doc,
   getDoc,
-  setDoc,
   Timestamp,
   runTransaction,
   writeBatch,
@@ -39,6 +38,7 @@ import {
 import { signOut } from 'firebase/auth';
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Haptics from 'expo-haptics';
 
 import { db, auth } from '../../config/firebaseConfig';
 import { AuthContext } from '../../contexts/AuthContext';
@@ -193,11 +193,7 @@ export default function DashboardScreen() {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [categoryFilter, setCategoryFilter] = useState('all');
 
-  // Gestão de Salário e Comprometimento
-  const [salary, setSalary] = useState(0);
-  const [salaryFilter, setSalaryFilter] = useState('all');
-  const [salaryModalVisible, setSalaryModalVisible] = useState(false);
-  const [tempSalary, setTempSalary] = useState('');
+  // Gestão de Assinaturas Temporárias
   const [trialModalVisible, setTrialModalVisible] = useState(false);
   const [trialSubscriptions, setTrialSubscriptions] = useState<TrialSubscription[]>([]);
   const [trialName, setTrialName] = useState('');
@@ -223,7 +219,6 @@ export default function DashboardScreen() {
     ...CATEGORIES.map((c) => ({ label: c, value: c })),
   ];
 
-  const peopleFilterItems: PickerItem[] = [{ label: 'Todos (Fatura Total)', value: 'all' }, ...myPeople];
   const isOwnerPersonId = (personId?: string | null) => Boolean(user?.uid && personId === user.uid);
   const formatMonthKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
   const getInvoiceMonthKeyFromPurchaseDate = (purchaseDate: Date, closingDayRaw?: number) => {
@@ -282,6 +277,24 @@ export default function DashboardScreen() {
     reminder.setHours(9, 0, 0, 0);
     return reminder;
   };
+  const triggerSuccessHaptic = async () => {
+    if (Platform.OS === 'web') return;
+    try {
+      const hapticsModule = Haptics as any;
+      const notificationType = hapticsModule?.NotificationFeedbackType?.Success;
+      if (typeof hapticsModule?.notificationAsync === 'function' && notificationType !== undefined) {
+        await hapticsModule.notificationAsync(notificationType);
+        return;
+      }
+
+      const impactStyle = hapticsModule?.ImpactFeedbackStyle?.Light;
+      if (typeof hapticsModule?.impactAsync === 'function' && impactStyle !== undefined) {
+        await hapticsModule.impactAsync(impactStyle);
+      }
+    } catch {
+      // No-op: alguns builds/simuladores não expõem o módulo nativo de haptics.
+    }
+  };
 
   // Listener das Transações (Real-time)
   useEffect(() => {
@@ -336,15 +349,9 @@ export default function DashboardScreen() {
     return () => unsubTrans();
   }, [user, currentDate, categoryFilter, myCards]);
 
-  // Listener de Cartões, Pessoas e Preferências
+  // Listener de Cartões e Pessoas
   useEffect(() => {
     if (!user) return;
-
-    (async () => {
-      const docRef = doc(db, 'user_prefs', user.uid);
-      const docSnap = await getDoc(docRef);
-      if (docSnap.exists()) setSalary(docSnap.data().salary || 0);
-    })();
 
     const unsubCards = onSnapshot(
       query(collection(db, 'cards'), where('userId', '==', user.uid)),
@@ -649,16 +656,6 @@ export default function DashboardScreen() {
   // Cálculos
   const monthTotal = filteredTransactions.reduce((acc, t) => acc + (t.amount || 0), 0);
 
-  const salarySpent =
-    salaryFilter === 'all'
-      ? monthTotal
-      : filteredTransactions
-          .filter((t) => t.personId === salaryFilter)
-          .reduce((acc, t) => acc + (t.amount || 0), 0);
-
-  const salaryPercent = salary > 0 ? (salarySpent / salary) * 100 : 0;
-  const progressColor = salaryPercent > 90 ? '#EF4444' : salaryPercent > 60 ? '#F59E0B' : '#10B981';
-
   // Handler de Pagamento
   async function handlePayBill(amountPaid: number, cardId: string) {
     if (!cardId) return Alert.alert('Erro', 'Selecione um cartão primeiro.');
@@ -845,6 +842,10 @@ export default function DashboardScreen() {
           tx.update(cardRef, { availableLimit: newAvailable });
         }
       });
+
+      if (!item.paid) {
+        await triggerSuccessHaptic();
+      }
     } catch (e) {
       console.error(e);
       Alert.alert('Erro', 'Falha ao atualizar status.');
@@ -1029,6 +1030,7 @@ export default function DashboardScreen() {
 
         setEditingId(null);
         setModalVisible(false);
+        await triggerSuccessHaptic();
         Alert.alert('Sucesso', 'Despesa editada!');
         return;
       }
@@ -1091,6 +1093,7 @@ export default function DashboardScreen() {
       });
 
       setModalVisible(false);
+      await triggerSuccessHaptic();
       Alert.alert('Sucesso', 'Lançado!');
     } catch (e) {
       console.error(e);
@@ -1098,15 +1101,6 @@ export default function DashboardScreen() {
     } finally {
       setIsSaving(false);
     }
-  }
-
-  async function handleSaveSalary() {
-    if (!user) return;
-    const val = parseFloat(String(tempSalary).replace(/\./g, '').replace(',', '.'));
-    if (isNaN(val)) return Alert.alert('Erro', 'Valor inválido');
-    await setDoc(doc(db, 'user_prefs', user.uid), { salary: val }, { merge: true });
-    setSalary(val);
-    setSalaryModalVisible(false);
   }
 
   function resetTrialForm() {
@@ -1309,31 +1303,6 @@ export default function DashboardScreen() {
         </View>
       </View>
 
-      {/* COMPROMETIMENTO */}
-      <View style={styles.salaryBox}>
-        <View style={styles.salaryHeader}>
-          <Text style={styles.salaryTitle}>Comprometimento</Text>
-          <View style={{ width: 170 }}>
-            <SmartPicker
-              items={peopleFilterItems}
-              selectedValue={salaryFilter}
-              onValueChange={(v) => setSalaryFilter(v || 'all')}
-              placeholder="Todos"
-              variant="compact"
-            />
-          </View>
-        </View>
-
-        <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 5, marginBottom: 5 }}>
-          <Text style={styles.salaryValue}>{isValuesVisible ? `R$ ${salarySpent.toFixed(2)}` : '••••'}</Text>
-          <Text style={{ color: '#94a3b8', fontSize: 12 }}>{isValuesVisible ? `(${salaryPercent.toFixed(1)}%)` : '(••%)'}</Text>
-        </View>
-
-        <View style={styles.progressBarBg}>
-          <View style={[styles.progressBarFill, { width: `${Math.min(salaryPercent, 100)}%`, backgroundColor: progressColor }]} />
-        </View>
-      </View>
-
       {/* EXTRATO */}
       <View style={styles.body}>
         <View style={styles.bodyHeader}>
@@ -1362,12 +1331,13 @@ export default function DashboardScreen() {
             renderItem={({ item }) => {
               const isPaid = Boolean(item.paid);
               return (
-                <View style={[styles.cardItem, isPaid && styles.cardItemPaid]}>
+                <View style={[styles.cardItem, isPaid ? styles.cardItemPaid : styles.cardItemPending]}>
+                  <View style={[styles.statusBar, isPaid ? styles.statusBarPaid : styles.statusBarPending]} />
                   <View style={styles.iconBox}>
                     <Ionicons name="pricetag" size={18} color="#3B82F6" />
                   </View>
 
-                  <View style={{ flex: 1, paddingHorizontal: 12 }}>
+                  <View style={styles.itemInfo}>
                     <Text style={styles.itemTitle} numberOfLines={1}>
                       {item.description}
                     </Text>
@@ -1376,12 +1346,14 @@ export default function DashboardScreen() {
                     </Text>
                   </View>
 
-                  <View style={{ alignItems: 'flex-end', marginRight: 10 }}>
+                  <View style={styles.itemMeta}>
                     <Text style={styles.itemAmount}>
                       {isValuesVisible ? `R$ ${Number(item.amount || 0).toFixed(2)}` : '••••'}
                     </Text>
                     <View style={styles.personBadge}>
-                      <Text style={styles.personBadgeText}>{item.personName}</Text>
+                      <Text style={styles.personBadgeText} numberOfLines={1}>
+                        {item.personName}
+                      </Text>
                     </View>
                   </View>
 
@@ -1396,7 +1368,7 @@ export default function DashboardScreen() {
                       <Ionicons
                         name={item.paid ? 'checkmark-circle' : 'checkmark-circle-outline'}
                         size={22}
-                        color={item.paid ? '#10B981' : '#94a3b8'}
+                        color={item.paid ? '#00ca39ff' : '#94a3b8'}
                       />
                     </TouchableOpacity>
                   </View>
@@ -1438,7 +1410,7 @@ export default function DashboardScreen() {
 
             <Text style={styles.label}>Valor para este cartão:</Text>
             <TextInput
-              style={styles.salaryInput}
+              style={styles.amountInput}
               keyboardType="numeric"
               value={paymentValue}
               onChangeText={setPaymentValue}
@@ -1465,88 +1437,91 @@ export default function DashboardScreen() {
       </Modal>
 
       {/* MODAL ADICIONAR/EDITAR */}
-      <Modal visible={modalVisible} animationType="slide" presentationStyle="pageSheet">
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={{ flex: 1, backgroundColor: '#1e293b' }}
-        >
-          <ScrollView contentContainerStyle={{ paddingBottom: 30 }}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>{editingId ? 'Editar Despesa' : 'Nova Despesa'}</Text>
-              <TouchableOpacity onPress={() => setModalVisible(false)}>
-                <Ionicons name="close-circle" size={34} color="#94a3b8" />
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Descrição</Text>
-              <TextInput
-                style={styles.input}
-                value={desc}
-                onChangeText={setDesc}
-                placeholder="Ex: Jantar"
-                placeholderTextColor="#64748b"
-              />
-            </View>
-
-            <View style={styles.row}>
-              <View style={{ flex: 1, marginRight: 10 }}>
-                <Text style={styles.label}>Valor (R$)</Text>
-                <TextInputMask type={'money'} style={styles.input} value={amount} onChangeText={setAmount} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.label}>Data</Text>
-                <TextInputMask
-                  type={'datetime'}
-                  options={{ format: 'DD/MM/YYYY' }}
-                  style={styles.input}
-                  value={dateText}
-                  onChangeText={setDateText}
-                />
-              </View>
-            </View>
-
-            {!editingId && (
-              <>
-                <View style={styles.switchContainer}>
-                  <Text style={styles.switchLabel}>Parcelado?</Text>
-                  <Switch value={isInstallment} onValueChange={setIsInstallment} trackColor={{ false: '#334155', true: '#3B82F6' }} />
+      <Modal visible={modalVisible} transparent animationType="slide" onRequestClose={() => setModalVisible(false)}>
+        <View style={styles.sheetOverlay}>
+          <TouchableOpacity style={styles.sheetBackdrop} activeOpacity={1} onPress={() => setModalVisible(false)} />
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.sheetKeyboard}>
+            <View style={styles.sheetContainer}>
+              <View style={styles.sheetHandle} />
+              <ScrollView contentContainerStyle={{ paddingBottom: 30 }} keyboardShouldPersistTaps="handled">
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>{editingId ? 'Editar Despesa' : 'Nova Despesa'}</Text>
+                  <TouchableOpacity onPress={() => setModalVisible(false)}>
+                    <Ionicons name="close-circle" size={34} color="#94a3b8" />
+                  </TouchableOpacity>
                 </View>
 
-                {isInstallment && (
-                  <View style={styles.inputGroup}>
-                    <Text style={styles.label}>Nº Parcelas</Text>
-                    <TextInput style={styles.input} keyboardType="numeric" value={installmentsCount} onChangeText={setInstallmentsCount} />
+                <View style={styles.inputGroup}>
+                  <Text style={styles.label}>Descrição</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={desc}
+                    onChangeText={setDesc}
+                    placeholder="Ex: Jantar"
+                    placeholderTextColor="#64748b"
+                  />
+                </View>
+
+                <View style={styles.row}>
+                  <View style={{ flex: 1, marginRight: 10 }}>
+                    <Text style={styles.label}>Valor (R$)</Text>
+                    <TextInputMask type={'money'} style={styles.input} value={amount} onChangeText={setAmount} />
                   </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.label}>Data</Text>
+                    <TextInputMask
+                      type={'datetime'}
+                      options={{ format: 'DD/MM/YYYY' }}
+                      style={styles.input}
+                      value={dateText}
+                      onChangeText={setDateText}
+                    />
+                  </View>
+                </View>
+
+                {!editingId && (
+                  <>
+                    <View style={styles.switchContainer}>
+                      <Text style={styles.switchLabel}>Parcelado?</Text>
+                      <Switch value={isInstallment} onValueChange={setIsInstallment} trackColor={{ false: '#334155', true: '#3B82F6' }} />
+                    </View>
+
+                    {isInstallment && (
+                      <View style={styles.inputGroup}>
+                        <Text style={styles.label}>Nº Parcelas</Text>
+                        <TextInput style={styles.input} keyboardType="numeric" value={installmentsCount} onChangeText={setInstallmentsCount} />
+                      </View>
+                    )}
+                  </>
                 )}
-              </>
-            )}
 
-            <SmartPicker
-              label="Categoria"
-              items={CATEGORIES.map((c) => ({ label: c, value: c }))}
-              selectedValue={category}
-              onValueChange={setCategory}
-            />
+                <SmartPicker
+                  label="Categoria"
+                  items={CATEGORIES.map((c) => ({ label: c, value: c }))}
+                  selectedValue={category}
+                  onValueChange={setCategory}
+                />
 
-            <View style={styles.row}>
-              <View style={{ flex: 1, marginRight: 5 }}>
-                <SmartPicker label="Cartão" items={myCards} selectedValue={selectedCard} onValueChange={setSelectedCard} />
-              </View>
-              <View style={{ flex: 1, marginLeft: 5 }}>
-                <SmartPicker label="Quem usou?" items={myPeople} selectedValue={selectedPerson} onValueChange={setSelectedPerson} />
-              </View>
+                <View style={styles.row}>
+                  <View style={{ flex: 1, marginRight: 5 }}>
+                    <SmartPicker label="Cartão" items={myCards} selectedValue={selectedCard} onValueChange={setSelectedCard} />
+                  </View>
+                  <View style={{ flex: 1, marginLeft: 5 }}>
+                    <SmartPicker label="Quem usou?" items={myPeople} selectedValue={selectedPerson} onValueChange={setSelectedPerson} />
+                  </View>
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.saveButton, isSaving && { opacity: 0.7 }]}
+                  onPress={handleAddTransaction}
+                  disabled={isSaving}
+                >
+                  <Text style={styles.saveButtonText}>{isSaving ? 'SALVANDO...' : editingId ? 'SALVAR' : 'LANÇAR'}</Text>
+                </TouchableOpacity>
+              </ScrollView>
             </View>
-
-            <TouchableOpacity
-              style={[styles.saveButton, isSaving && { opacity: 0.7 }]}
-              onPress={handleAddTransaction}
-              disabled={isSaving}
-            >
-              <Text style={styles.saveButtonText}>{isSaving ? 'SALVANDO...' : editingId ? 'SALVAR' : 'LANÇAR'}</Text>
-            </TouchableOpacity>
-          </ScrollView>
-        </KeyboardAvoidingView>
+          </KeyboardAvoidingView>
+        </View>
       </Modal>
 
       {/* MODAL ALERTA */}
@@ -1575,18 +1550,6 @@ export default function DashboardScreen() {
               <Ionicons name="person-circle" size={50} color="#3B82F6" />
               <Text style={styles.menuUserEmail}>{user?.email}</Text>
             </View>
-
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={() => {
-                setMenuVisible(false);
-                setTempSalary(String(salary));
-                setSalaryModalVisible(true);
-              }}
-            >
-              <Ionicons name="cash-outline" size={22} color="#FFF" />
-              <Text style={styles.menuItemText}>Definir Salário</Text>
-            </TouchableOpacity>
 
             <TouchableOpacity
               style={styles.menuItem}
@@ -1691,28 +1654,6 @@ export default function DashboardScreen() {
           </View>
         </View>
       </Modal>
-
-      {/* MODAL SALÁRIO */}
-      <Modal visible={salaryModalVisible} transparent animationType="fade">
-        <View style={styles.alertOverlay}>
-          <View style={styles.alertBox}>
-            <Text style={styles.alertTitle}>Definir Salário</Text>
-            <TextInput
-              style={styles.salaryInput}
-              keyboardType="numeric"
-              value={tempSalary}
-              onChangeText={setTempSalary}
-              autoFocus
-            />
-            <TouchableOpacity style={styles.saveButton} onPress={handleSaveSalary}>
-              <Text style={styles.saveButtonText}>Salvar</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => setSalaryModalVisible(false)} style={{ marginTop: 15 }}>
-              <Text style={{ color: '#94a3b8' }}>Cancelar</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }
@@ -1728,7 +1669,7 @@ const styles = StyleSheet.create({
 
   headerControls: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 15 },
   headerLabel: { color: '#94a3b8', fontSize: 12, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 },
-  headerValue: { color: '#FFF', fontSize: 32, fontWeight: 'bold' },
+  headerValue: { color: '#FFF', fontSize: 32, fontWeight: 'bold', fontVariant: ['tabular-nums'] },
 
   profileIcon: {
     width: 40,
@@ -1744,63 +1685,78 @@ const styles = StyleSheet.create({
   payBillButton: { backgroundColor: '#00ff66ff', paddingHorizontal: 15, paddingVertical: 12, borderRadius: 10 },
   payBillText: { color: '#000000ff', fontWeight: 'bold', fontSize: 14 },
 
-  salaryBox: {
-    marginHorizontal: 20,
-    padding: 16,
-    backgroundColor: '#1e293b',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  salaryHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  salaryTitle: { color: '#94a3b8', fontSize: 14, fontWeight: '600' },
-  salaryValue: { color: '#FFF', fontWeight: 'bold', fontSize: 18 },
-
-  progressBarBg: { height: 8, backgroundColor: '#0f172a', borderRadius: 4, overflow: 'hidden' },
-  progressBarFill: { height: '100%', borderRadius: 4 },
-
   body: { flex: 1, paddingHorizontal: 20, marginTop: 20 },
   bodyHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 },
   sectionTitle: { fontSize: 18, fontWeight: '700', color: '#FFF', textTransform: 'capitalize' },
 
   cardItem: {
     backgroundColor: '#1e293b',
-    padding: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 12,
     borderRadius: 16,
     marginBottom: 12,
     flexDirection: 'row',
     alignItems: 'center',
     borderWidth: 1,
     borderColor: '#334155',
+    position: 'relative',
+    overflow: 'hidden',
   },
-  cardItemPaid: { borderColor: '#10B981', backgroundColor: 'rgba(16, 185, 129, 0.05)' },
+  cardItemPending: { borderColor: '#334155', backgroundColor: '#1e293b' },
+  cardItemPaid: { borderColor: 'rgba(16, 185, 129, 0.28)', backgroundColor: 'rgba(16, 185, 129, 0.035)' },
+  statusBar: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 4,
+  },
+  statusBarPending: { backgroundColor: 'rgba(59, 130, 246, 0.7)' },
+  statusBarPaid: { backgroundColor: 'rgba(16, 185, 129, 0.85)' },
   cardItemOverdue: { borderColor: '#EF4444', backgroundColor: 'rgba(239, 68, 68, 0.05)' },
 
   iconBox: {
-    width: 40,
-    height: 40,
+    width: 38,
+    height: 38,
     borderRadius: 12,
     backgroundColor: 'rgba(59, 130, 246, 0.1)',
     justifyContent: 'center',
     alignItems: 'center',
   },
 
+  itemInfo: { flex: 1, paddingHorizontal: 12, minWidth: 0 },
   itemTitle: { fontSize: 16, fontWeight: '600', color: '#f1f5f9' },
   itemSubtitle: { fontSize: 12, color: '#94a3b8', marginTop: 4 },
-  itemAmount: { fontSize: 16, fontWeight: '700', color: '#FFF' },
+  itemMeta: { alignItems: 'flex-end', minWidth: 100, marginRight: 8 },
+  itemAmount: { fontSize: 16, fontWeight: '700', color: '#FFF', fontVariant: ['tabular-nums'] },
 
   personBadge: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: 'rgba(59, 130, 246, 0.14)',
     paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 4,
-    marginTop: 4,
-    maxWidth: 110,
+    paddingVertical: 3,
+    borderRadius: 999,
+    marginTop: 6,
+    maxWidth: 100,
   },
-  personBadgeText: { color: '#3B82F6', fontSize: 10, fontWeight: 'bold' },
+  personBadgeText: { color: '#93c5fd', fontSize: 10, fontWeight: '700' },
 
-  actionButtons: { flexDirection: 'row', alignItems: 'center' },
-  actionButton: { padding: 6, marginLeft: 8 },
+  actionButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginLeft: 4,
+    paddingLeft: 8,
+    borderLeftWidth: 1,
+    borderLeftColor: '#334155',
+    gap: 6,
+  },
+  actionButton: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: 'rgba(15,23,42,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 
   // ✅ sobe o FAB pra não ficar colado na TabBar / safe-area
   fab: {
@@ -1814,6 +1770,36 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     elevation: 8,
+  },
+
+  sheetOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  sheetBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  sheetKeyboard: {
+    justifyContent: 'flex-end',
+  },
+  sheetContainer: {
+    backgroundColor: '#1e293b',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderTopWidth: 1,
+    borderColor: '#334155',
+    maxHeight: '88%',
+    paddingBottom: 16,
+  },
+  sheetHandle: {
+    width: 44,
+    height: 5,
+    borderRadius: 99,
+    backgroundColor: '#475569',
+    alignSelf: 'center',
+    marginTop: 10,
+    marginBottom: 4,
   },
 
   modalHeader: {
@@ -1899,7 +1885,7 @@ const styles = StyleSheet.create({
   trialTitle: { color: '#FFF', fontWeight: '700', fontSize: 14, marginBottom: 4 },
   trialSubtitle: { color: '#94a3b8', fontSize: 12 },
 
-  salaryInput: { backgroundColor: '#0f172a', color: '#FFF', fontSize: 24, padding: 15, width: '100%', textAlign: 'center', borderRadius: 12, marginBottom: 15, borderWidth: 1, borderColor: '#334155' },
+  amountInput: { backgroundColor: '#0f172a', color: '#FFF', fontSize: 24, padding: 15, width: '100%', textAlign: 'center', borderRadius: 12, marginBottom: 15, borderWidth: 1, borderColor: '#334155' },
 
   menuOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-start', alignItems: 'flex-end', paddingTop: 80, paddingRight: 20 },
   menuContent: { backgroundColor: '#1e293b', borderRadius: 20, width: 220, padding: 15, borderWidth: 1, borderColor: '#334155' },

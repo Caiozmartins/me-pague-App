@@ -1,4 +1,4 @@
-import React, { useContext, useEffect, useState } from 'react';
+import React, { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,8 @@ import {
   Platform,
   Share,
   Alert,
+  Animated,
+  Easing,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { collection, getDocs, orderBy, query, Timestamp, where } from 'firebase/firestore';
@@ -36,6 +38,15 @@ type ReportTransaction = {
   origin?: 'purchase' | 'revolving';
 };
 
+type DistributionRow = {
+  name: string;
+  total: number;
+  percent: number;
+  color: string;
+};
+
+const PIE_COLORS = ['#3B82F6', '#0EA5E9', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6'];
+
 export default function ReportsScreen() {
   const { user } = useContext(AuthContext);
   const [loading, setLoading] = useState(true);
@@ -48,6 +59,24 @@ export default function ReportsScreen() {
   const [byPerson, setByPerson] = useState<ChartRow[]>([]);
   const [byCategory, setByCategory] = useState<ChartRow[]>([]);
   const [monthlyTransactions, setMonthlyTransactions] = useState<ReportTransaction[]>([]);
+  const chartIntro = useRef(new Animated.Value(0)).current;
+
+  const buildDistribution = (rows: ChartRow[]): DistributionRow[] => {
+    if (rows.length === 0) return [];
+
+    const top = rows.slice(0, 5);
+    const othersTotal = rows.slice(5).reduce((acc, row) => acc + row.total, 0);
+    const total = rows.reduce((acc, row) => acc + row.total, 0);
+
+    const grouped = othersTotal > 0 ? [...top, { name: 'Outros', total: othersTotal, percent: total > 0 ? (othersTotal / total) * 100 : 0 }] : top;
+    return grouped.map((row, idx) => ({
+      ...row,
+      color: PIE_COLORS[idx % PIE_COLORS.length],
+    }));
+  };
+
+  const personDistribution = useMemo(() => buildDistribution(byPerson), [byPerson]);
+  const categoryDistribution = useMemo(() => buildDistribution(byCategory), [byCategory]);
 
   const fetchReportData = async () => {
     if (!user) return;
@@ -137,6 +166,17 @@ export default function ReportsScreen() {
     fetchReportData();
   }, [user, currentDate]);
 
+  useEffect(() => {
+    if (loading) return;
+    chartIntro.setValue(0);
+    Animated.timing(chartIntro, {
+      toValue: 1,
+      duration: 500,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [loading, byPerson.length, byCategory.length, currentDate, chartIntro]);
+
   const onRefresh = () => {
     setRefreshing(true);
     fetchReportData();
@@ -148,68 +188,45 @@ export default function ReportsScreen() {
     setCurrentDate(next);
   };
 
-  const buildCsv = () => {
-    const headers = ['Data', 'Descricao', 'Cartao', 'Pessoa', 'Categoria', 'Origem', 'Pago', 'Valor'];
-    const escapeCsv = (value: string) => `"${String(value).replace(/"/g, '""')}"`;
-    const lines = monthlyTransactions.map((item) =>
-      [
-        item.dateLabel,
-        '-',
-        item.cardName || '-',
-        item.personName || 'Desconhecido',
-        item.category || 'Outros',
-        item.origin || 'purchase',
-        item.paid ? 'sim' : 'nao',
-        Number(item.amount || 0).toFixed(2),
-      ]
-        .map(escapeCsv)
-        .join(',')
-    );
-    return [headers.join(','), ...lines].join('\n');
-  };
-
-  const handleExportCsv = async () => {
-    if (monthlyTransactions.length === 0) {
-      Alert.alert('Exportação', 'Não há dados para exportar neste mês.');
-      return;
-    }
-
-    const csv = buildCsv();
-    const monthTag = currentDate.toISOString().slice(0, 7);
-
-    if (Platform.OS === 'web' && typeof document !== 'undefined') {
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `relatorio-${monthTag}.csv`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-      return;
-    }
-
-    await Share.share({
-      message: csv,
-      title: `Relatorio ${monthTag}`,
-    });
-  };
+  const escapeHtml = (value: string) =>
+    String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
 
   const buildPrintableHtml = () => {
     const monthTitle = currentDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }).toUpperCase();
+    const monthTag = currentDate.toISOString().slice(0, 7);
+    const fmt = (value: number) =>
+      Number(value || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
     const rows = monthlyTransactions
       .map(
         (item) =>
           `<tr>
-            <td>${item.dateLabel}</td>
-            <td>${item.cardName || '-'}</td>
-            <td>${item.personName || 'Desconhecido'}</td>
-            <td>${item.category || 'Outros'}</td>
-            <td>${item.origin || 'purchase'}</td>
-            <td>${item.paid ? 'Sim' : 'Não'}</td>
-            <td>R$ ${Number(item.amount || 0).toFixed(2)}</td>
+            <td>${escapeHtml(item.dateLabel || '-')}</td>
+            <td>${escapeHtml(item.cardName || '-')}</td>
+            <td>${escapeHtml(item.personName || 'Desconhecido')}</td>
+            <td>${escapeHtml(item.category || 'Outros')}</td>
+            <td>${item.origin === 'revolving' ? 'Rotativo' : 'Compra'}</td>
+            <td><span class="badge ${item.paid ? 'ok' : 'warn'}">${item.paid ? 'Pago' : 'Pendente'}</span></td>
+            <td class="money">${fmt(Number(item.amount || 0))}</td>
           </tr>`
+      )
+      .join('');
+    const topPeople = byPerson
+      .slice(0, 5)
+      .map(
+        (item, idx) =>
+          `<li><span>${idx + 1}. ${escapeHtml(item.name)}</span><strong>${fmt(item.total)} (${item.percent.toFixed(1)}%)</strong></li>`
+      )
+      .join('');
+    const topCategories = byCategory
+      .slice(0, 5)
+      .map(
+        (item, idx) =>
+          `<li><span>${idx + 1}. ${escapeHtml(item.name)}</span><strong>${fmt(item.total)} (${item.percent.toFixed(1)}%)</strong></li>`
       )
       .join('');
 
@@ -217,20 +234,65 @@ export default function ReportsScreen() {
       <html>
         <head>
           <meta charset="utf-8" />
-          <title>Relatorio ${monthTitle}</title>
+          <title>Relatório ${monthTitle}</title>
           <style>
-            body { font-family: Arial, sans-serif; padding: 24px; }
-            h1 { margin-bottom: 4px; }
-            p { margin-top: 0; color: #555; }
-            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-            th, td { border: 1px solid #ddd; padding: 8px; font-size: 12px; text-align: left; }
-            th { background: #f5f5f5; }
+            :root { --bg:#f8fafc; --ink:#0f172a; --muted:#475569; --line:#cbd5e1; --accent:#1d4ed8; --card:#ffffff; --ok:#047857; --warn:#b45309; }
+            * { box-sizing: border-box; }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--ink); padding: 28px; }
+            .header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom: 18px; }
+            h1 { margin:0; font-size: 26px; letter-spacing: -0.5px; }
+            .sub { margin-top:6px; color: var(--muted); font-size: 13px; }
+            .tag { font-size: 12px; background:#dbeafe; color:#1e3a8a; padding:6px 10px; border-radius:999px; font-weight:600; }
+            .grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+            .kpi { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+            .kpi b { display:block; font-size: 20px; margin-top: 6px; }
+            .kpi span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.7px; }
+            .cards { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+            .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+            .card h3 { margin:0 0 8px 0; font-size: 14px; }
+            .rank { list-style:none; margin:0; padding:0; }
+            .rank li { display:flex; justify-content:space-between; font-size:12px; padding:6px 0; border-top:1px solid #e2e8f0; }
+            .rank li:first-child { border-top:none; }
+            .section-title { margin: 16px 0 8px; font-size: 14px; font-weight: 700; text-transform: uppercase; color: #334155; letter-spacing: 0.6px; }
+            table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+            th, td { padding: 9px 10px; font-size: 12px; text-align: left; border-bottom: 1px solid #e2e8f0; }
+            th { background: #eff6ff; color:#1e3a8a; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+            tr:nth-child(even) td { background: #f8fafc; }
+            .money { text-align:right; font-weight:700; font-variant-numeric: tabular-nums; }
+            .badge { display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; }
+            .badge.ok { color: var(--ok); background: #dcfce7; }
+            .badge.warn { color: var(--warn); background: #fef3c7; }
+            .footer { margin-top: 10px; color: var(--muted); font-size: 11px; text-align: right; }
+            @page { size: A4; margin: 12mm; }
           </style>
         </head>
         <body>
-          <h1>Relatório Mensal</h1>
-          <p>${monthTitle}</p>
-          <p>Total: R$ ${totalSpent.toFixed(2)} | Compras: R$ ${purchaseTotal.toFixed(2)} | Rotativo: R$ ${revolvingTotal.toFixed(2)}</p>
+          <div class="header">
+            <div>
+              <h1>Relatório Mensal</h1>
+              <div class="sub">Período: ${monthTitle}</div>
+            </div>
+            <div class="tag">${monthTag}</div>
+          </div>
+
+          <div class="grid">
+            <div class="kpi"><span>Total no mês</span><b>${fmt(totalSpent)}</b></div>
+            <div class="kpi"><span>Compras</span><b>${fmt(purchaseTotal)}</b></div>
+            <div class="kpi"><span>Rotativo</span><b>${fmt(revolvingTotal)}</b></div>
+          </div>
+
+          <div class="cards">
+            <div class="card">
+              <h3>Top pessoas</h3>
+              <ul class="rank">${topPeople || '<li><span>Sem dados</span><strong>-</strong></li>'}</ul>
+            </div>
+            <div class="card">
+              <h3>Top categorias</h3>
+              <ul class="rank">${topCategories || '<li><span>Sem dados</span><strong>-</strong></li>'}</ul>
+            </div>
+          </div>
+
+          <div class="section-title">Lançamentos do mês</div>
           <table>
             <thead>
               <tr>
@@ -239,6 +301,7 @@ export default function ReportsScreen() {
             </thead>
             <tbody>${rows}</tbody>
           </table>
+          <div class="footer">Gerado em ${new Date().toLocaleString('pt-BR')}</div>
         </body>
       </html>
     `;
@@ -284,6 +347,35 @@ export default function ReportsScreen() {
     </View>
   );
 
+  const DistributionStrip = ({ data }: { data: DistributionRow[] }) => (
+    <View style={styles.stripWrapper}>
+      <View style={styles.stripTrack}>
+        {data.map((item, index) => (
+          <View
+            key={`${item.name}-${index}`}
+            style={[
+              styles.stripSegment,
+              {
+                width: `${Math.max(item.percent, 4)}%`,
+                backgroundColor: item.color,
+              },
+            ]}
+          />
+        ))}
+      </View>
+      <View style={styles.stripLegend}>
+        {data.map((item, index) => (
+          <View key={`${item.name}-legend-${index}`} style={styles.legendItem}>
+            <View style={[styles.legendDot, { backgroundColor: item.color }]} />
+            <Text style={styles.legendText} numberOfLines={1}>
+              {item.name} ({item.percent.toFixed(1)}%)
+            </Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
@@ -304,16 +396,6 @@ export default function ReportsScreen() {
         <Text style={styles.headerTitle}>Relatório Mensal</Text>
         <Text style={styles.totalValue}>{totalSpent.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</Text>
         <Text style={styles.totalLabel}>TOTAL NO MÊS</Text>
-        <View style={styles.exportRow}>
-          <TouchableOpacity style={styles.exportButton} onPress={handleExportCsv}>
-            <Ionicons name="download-outline" size={15} color="#FFF" />
-            <Text style={styles.exportButtonText}>CSV</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.exportButton} onPress={handleExportPdf}>
-            <Ionicons name="print-outline" size={15} color="#FFF" />
-            <Text style={styles.exportButtonText}>PDF</Text>
-          </TouchableOpacity>
-        </View>
       </View>
 
       {loading ? (
@@ -345,9 +427,29 @@ export default function ReportsScreen() {
             {byPerson.length === 0 ? (
               <Text style={styles.emptyText}>Sem dados para este mês.</Text>
             ) : (
-              byPerson.map((item, index) => (
-                <ChartBar key={`${item.name}-${index}`} label={item.name} value={item.total} percent={item.percent} color="#3B82F6" />
-              ))
+              <>
+                <Animated.View
+                  style={[
+                    styles.chartEntrance,
+                    {
+                      opacity: chartIntro,
+                      transform: [
+                        {
+                          translateY: chartIntro.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [14, 0],
+                          }),
+                        },
+                      ],
+                    },
+                  ]}
+                >
+                  <DistributionStrip data={personDistribution} />
+                </Animated.View>
+                {personDistribution.map((item, index) => (
+                  <ChartBar key={`${item.name}-${index}`} label={item.name} value={item.total} percent={item.percent} color={item.color} />
+                ))}
+              </>
             )}
           </View>
 
@@ -362,15 +464,29 @@ export default function ReportsScreen() {
             {byCategory.length === 0 ? (
               <Text style={styles.emptyText}>Sem compras para este mês.</Text>
             ) : (
-              byCategory.map((item, index) => (
-                <ChartBar
-                  key={`${item.name}-${index}`}
-                  label={item.name}
-                  value={item.total}
-                  percent={item.percent}
-                  color={index === 0 ? '#EF4444' : '#F59E0B'}
-                />
-              ))
+              <>
+                <Animated.View
+                  style={[
+                    styles.chartEntrance,
+                    {
+                      opacity: chartIntro,
+                      transform: [
+                        {
+                          translateY: chartIntro.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [14, 0],
+                          }),
+                        },
+                      ],
+                    },
+                  ]}
+                >
+                  <DistributionStrip data={categoryDistribution} />
+                </Animated.View>
+                {categoryDistribution.map((item, index) => (
+                  <ChartBar key={`${item.name}-${index}`} label={item.name} value={item.total} percent={item.percent} color={item.color} />
+                ))}
+              </>
             )}
           </View>
         </ScrollView>
@@ -392,17 +508,19 @@ const styles = StyleSheet.create({
   monthNav: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginBottom: 10 },
   monthTitle: { color: '#cbd5e1', fontSize: 14, fontWeight: '700', marginHorizontal: 16 },
   headerTitle: { color: 'rgba(255,255,255,0.8)', fontSize: 15, fontWeight: '600', marginBottom: 4 },
-  totalValue: { color: '#FFF', fontSize: 34, fontWeight: '800' },
+  totalValue: { color: '#FFF', fontSize: 34, fontWeight: '800', fontVariant: ['tabular-nums'] },
   totalLabel: { color: 'rgba(255,255,255,0.6)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 },
-  exportRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  exportRow: { flexDirection: 'row', gap: 8, marginTop: 12, width: '100%', justifyContent: 'center' },
   exportButton: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 5,
-    backgroundColor: '#334155',
-    borderRadius: 10,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    backgroundColor: '#1d4ed8',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    minWidth: 150,
   },
   exportButtonText: { color: '#FFF', fontWeight: '600', fontSize: 12 },
   kpiRow: { flexDirection: 'row', marginHorizontal: 20, marginBottom: 16, gap: 10 },
@@ -414,7 +532,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   kpiLabel: { color: '#94a3b8', fontSize: 12, marginBottom: 4 },
-  kpiValue: { color: '#FFF', fontSize: 18, fontWeight: '700' },
+  kpiValue: { color: '#FFF', fontSize: 18, fontWeight: '700', fontVariant: ['tabular-nums'] },
   section: {
     backgroundColor: '#1e293b',
     marginHorizontal: 20,
@@ -427,10 +545,53 @@ const styles = StyleSheet.create({
   sectionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
   sectionTitle: { fontSize: 18, fontWeight: '700', color: '#FFF', marginLeft: 12 },
   iconBox: { width: 36, height: 36, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
+  chartEntrance: { alignItems: 'center', marginBottom: 12 },
+  stripWrapper: { width: '100%' },
+  stripTrack: {
+    width: '100%',
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    overflow: 'hidden',
+    flexDirection: 'row',
+  },
+  stripSegment: {
+    height: '100%',
+  },
+  stripLegend: {
+    marginTop: 10,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15,23,42,0.65)',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    maxWidth: '100%',
+  },
+  legendDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  legendText: {
+    color: '#cbd5e1',
+    fontSize: 11,
+    fontWeight: '600',
+  },
   chartItem: { marginBottom: 16 },
   chartHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
   chartLabel: { fontSize: 15, fontWeight: '600', color: '#cbd5e1' },
-  chartValue: { fontSize: 15, fontWeight: '700', color: '#FFF' },
+  chartValue: { fontSize: 15, fontWeight: '700', color: '#FFF', fontVariant: ['tabular-nums'] },
   progressBarBg: {
     height: 8,
     backgroundColor: '#0f172a',

@@ -4,7 +4,6 @@ import {
   Dimensions, Modal, TextInput, Alert, Platform, UIManager, LayoutAnimation, ScrollView
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
 import { 
   collection, query, where, onSnapshot, addDoc, 
   deleteDoc, doc, updateDoc, getDoc, getDocs, limit
@@ -12,13 +11,14 @@ import {
 import { db } from '../../config/firebaseConfig';
 import { AuthContext } from '../../contexts/AuthContext';
 import { Card } from '../../types';
+import VirtualCard, { VIRTUAL_CARD_HEIGHT, VIRTUAL_CARD_WIDTH } from '../../components/VirtualCard';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
 const { width } = Dimensions.get('window');
-const SHINY_BLACK_THEME = ['#4b5563', '#1f2937', '#000000']; 
+const CARD_STACK_OFFSET = 90;
 
 export default function CardsScreen() {
   const { user } = useContext(AuthContext);
@@ -32,6 +32,7 @@ export default function CardsScreen() {
   const [newLimit, setNewLimit] = useState('');
   const [newClosingDay, setNewClosingDay] = useState('');
   const [newDueDay, setNewDueDay] = useState('');
+  const [newBank, setNewBank] = useState('');
   const [newLast4, setNewLast4] = useState('');
 
   useEffect(() => {
@@ -60,6 +61,7 @@ export default function CardsScreen() {
     setNewLimit(String(card.totalLimit));
     setNewClosingDay(String(card.closingDay));
     setNewDueDay(String(card.dueDay ?? ''));
+    setNewBank(String(card.bank ?? ''));
     setNewLast4(card.last4);
     setModalVisible(true);
   };
@@ -67,7 +69,7 @@ export default function CardsScreen() {
   const closeModal = () => {
     setModalVisible(false);
     setEditingId(null);
-    setNewName(''); setNewLimit(''); setNewClosingDay(''); setNewDueDay(''); setNewLast4('');
+    setNewName(''); setNewLimit(''); setNewClosingDay(''); setNewDueDay(''); setNewBank(''); setNewLast4('');
   };
 
   async function handleSaveCard() {
@@ -95,6 +97,7 @@ export default function CardsScreen() {
               availableLimit: oldAvailable + difference, 
               closingDay: Number(newClosingDay), 
               dueDay: Number(newDueDay),
+              bank: newBank.trim() || null,
               last4: newLast4,
             });
           Alert.alert("Sucesso", "Cartão e limites atualizados! 💳");
@@ -107,6 +110,7 @@ export default function CardsScreen() {
           availableLimit: limitValue,
           closingDay: Number(newClosingDay), 
           dueDay: Number(newDueDay),
+          bank: newBank.trim() || null,
           last4: newLast4,
           createdAt: new Date().toISOString()
         });
@@ -168,11 +172,23 @@ export default function CardsScreen() {
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollStack} showsVerticalScrollIndicator={false}>
-        <View style={[styles.stackContainer, { height: cards.length * 70 + 220 }]}> 
+        <View style={[styles.stackContainer, { height: cards.length * CARD_STACK_OFFSET + VIRTUAL_CARD_HEIGHT + 40 }]}> 
           {cards.length === 0 ? (
             <View style={styles.emptyContainer}>
-              <Ionicons name="card-outline" size={60} color="#334155" />
-              <Text style={styles.emptyText}>Carteira vazia.</Text>
+              <View style={styles.emptyCardBadge}>
+                <Ionicons name="card-outline" size={42} color="#93c5fd" />
+                <View style={styles.emptyCardBadgeDot}>
+                  <Ionicons name="sparkles" size={11} color="#0f172a" />
+                </View>
+              </View>
+              <Text style={styles.emptyTitle}>Ainda não adicionaste nenhum cartão</Text>
+              <Text style={styles.emptySubtitle}>
+                Adiciona o primeiro cartão para começar a lançar despesas e acompanhar limites em tempo real.
+              </Text>
+              <TouchableOpacity style={styles.emptyAction} onPress={() => setModalVisible(true)}>
+                <Ionicons name="add" size={16} color="#0f172a" />
+                <Text style={styles.emptyActionText}>Vamos começar</Text>
+              </TouchableOpacity>
             </View>
           ) : (
             cards.map((card, index) => {
@@ -182,41 +198,32 @@ export default function CardsScreen() {
                   key={card.id}
                   activeOpacity={0.9}
                   onPress={() => handleCardPress(index)}
-                  style={[styles.cardWrapper, { top: index * 65, zIndex: isActive ? 100 : index, transform: [{ scale: isActive ? 1.05 : 1 }] }]}
+                  style={[
+                    styles.cardWrapper,
+                    {
+                      top: index * CARD_STACK_OFFSET,
+                      left: (width - VIRTUAL_CARD_WIDTH) / 2,
+                      zIndex: isActive ? 100 : index,
+                      transform: [{ scale: isActive ? 1.01 : 1 }],
+                    },
+                  ]}
                 >
-                  <LinearGradient colors={SHINY_BLACK_THEME as any} style={styles.cardFace}>
-                    <View style={styles.shineEffect} />
-                    <View style={styles.cardHeader}>
-                      <View style={styles.chip} />
-                      {isActive && (
-                        <View style={{ flexDirection: 'row', gap: 10 }}>
-                          <TouchableOpacity onPress={() => handleEditPress(card)} style={styles.actionBtn}>
-                            <Ionicons name="create-outline" size={22} color="#3B82F6" />
-                          </TouchableOpacity>
-                          <TouchableOpacity onPress={() => handleDelete(card.id)} style={styles.actionBtn}>
-                            <Ionicons name="trash-outline" size={22} color="#EF4444" />
-                          </TouchableOpacity>
-                        </View>
-                      )}
+                  <VirtualCard
+                    card={card}
+                    variant={(((index % 4) + 1) as 1 | 2 | 3 | 4)}
+                    isFrozen={card.availableLimit <= 0}
+                  />
+                  {isActive && (
+                    <View style={styles.cardActions}>
+                      <TouchableOpacity onPress={() => handleEditPress(card)} style={styles.actionBtn}>
+                        <Ionicons name="create-outline" size={22} color="#3B82F6" />
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => handleDelete(card.id)} style={styles.actionBtn}>
+                        <Ionicons name="trash-outline" size={22} color="#EF4444" />
+                      </TouchableOpacity>
                     </View>
-                    <Text style={styles.cardNumber}>•••• •••• •••• {card.last4 || '****'}</Text>
-                    <View style={styles.cardFooter}>
-                      <View>
-                        <Text style={styles.cardLabel}>DISPONÍVEL / TOTAL</Text>
-                        <Text style={styles.cardValue}>R$ {card.availableLimit?.toFixed(2)} / {card.totalLimit?.toFixed(2)}</Text>
-                      </View>
-                      <View>
-                        <Text style={styles.cardLabel}>FECHAMENTO</Text>
-                        <Text style={styles.cardValue}>DIA {card.closingDay}</Text>
-                      </View>
-                      <View>
-                        <Text style={styles.cardLabel}>VENCIMENTO</Text>
-                        <Text style={styles.cardValue}>DIA {card.dueDay ?? '--'}</Text>
-                      </View>
-                    </View>
-                    <Text style={styles.cardName}>{card.name}</Text>
-                  </LinearGradient>
-                </TouchableOpacity>
+                  )}
+	                </TouchableOpacity>
               );
             })
           )}
@@ -233,6 +240,9 @@ export default function CardsScreen() {
 
             <Text style={styles.inputLabel}>Limite Total (R$)</Text>
             <TextInput style={styles.input} keyboardType="numeric" value={newLimit} onChangeText={setNewLimit} placeholder="0.00" placeholderTextColor="#64748b" />
+
+            <Text style={styles.inputLabel}>Banco/Bandeira (opcional)</Text>
+            <TextInput style={styles.input} value={newBank} onChangeText={setNewBank} placeholder="Ex: Nubank, Visa, Mastercard" placeholderTextColor="#64748b" />
 
             <View style={styles.row}>
               <View style={{flex: 1, marginRight: 10}}>
@@ -271,19 +281,44 @@ const styles = StyleSheet.create({
   addButton: { width: 50, height: 50, borderRadius: 25, backgroundColor: '#3B82F6', justifyContent: 'center', alignItems: 'center' },
   scrollStack: { paddingBottom: 100, paddingTop: 20 },
   stackContainer: { alignItems: 'center', width: '100%', position: 'relative' },
-  cardWrapper: { position: 'absolute', width: width * 0.90, height: 200 },
-  cardFace: { flex: 1, borderRadius: 20, padding: 24, justifyContent: 'space-between', borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)', overflow: 'hidden' },
-  shineEffect: { position: 'absolute', top: -50, left: -50, width: 200, height: 200, backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 100 },
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  chip: { width: 45, height: 32, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 6 },
-  actionBtn: { backgroundColor: 'rgba(0,0,0,0.3)', padding: 8, borderRadius: 50 },
-  cardNumber: { color: '#e2e8f0', fontSize: 20, letterSpacing: 4, fontWeight: 'bold' },
-  cardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' },
-  cardLabel: { color: 'rgba(255,255,255,0.5)', fontSize: 10, fontWeight: 'bold' },
-  cardValue: { color: '#FFF', fontSize: 13, fontWeight: 'bold' },
-  cardName: { position: 'absolute', top: 24, left: 80, color: 'rgba(255,255,255,0.9)', fontWeight: 'bold', fontSize: 18, textTransform: 'uppercase' },
-  emptyContainer: { alignItems: 'center', marginTop: 100, opacity: 0.7 },
-  emptyText: { color: '#FFF', fontSize: 18, fontWeight: 'bold' },
+  cardWrapper: { position: 'absolute', width: VIRTUAL_CARD_WIDTH, height: VIRTUAL_CARD_HEIGHT },
+  cardActions: { position: 'absolute', right: 12, top: 12, flexDirection: 'row', alignItems: 'center', gap: 10, zIndex: 5 },
+  actionBtn: { backgroundColor: 'rgba(0,0,0,0.45)', padding: 8, borderRadius: 50 },
+  emptyContainer: { alignItems: 'center', justifyContent: 'center', marginTop: 70, paddingHorizontal: 28 },
+  emptyCardBadge: {
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    backgroundColor: 'rgba(59,130,246,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(59,130,246,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 18,
+  },
+  emptyCardBadgeDot: {
+    position: 'absolute',
+    right: 8,
+    top: 10,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#93c5fd',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyTitle: { color: '#f8fafc', fontSize: 22, fontWeight: '700', textAlign: 'center', marginBottom: 10 },
+  emptySubtitle: { color: '#94a3b8', fontSize: 14, textAlign: 'center', lineHeight: 20, marginBottom: 20, maxWidth: 320 },
+  emptyAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#93c5fd',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 12,
+  },
+  emptyActionText: { color: '#0f172a', fontWeight: '700' },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', padding: 20 },
   modalContent: { backgroundColor: '#1e293b', borderRadius: 24, padding: 24, borderWidth: 1, borderColor: '#334155' },
   modalTitle: { fontSize: 22, fontWeight: 'bold', color: '#FFF', marginBottom: 20, textAlign: 'center' },

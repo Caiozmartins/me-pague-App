@@ -1,5 +1,5 @@
 import React from 'react';
-import { Platform } from 'react-native';
+import { Platform, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -15,6 +15,14 @@ import ReportsScreen from '../screens/Reports/ReportsScreen';
 
 const Tab = createBottomTabNavigator();
 const PeopleStack = createNativeStackNavigator<PeopleStackParamList>();
+
+function TabBarGlassBackground() {
+  return (
+    <View style={styles.tabGlassBase}>
+      <View style={styles.tabGlassHighlight} />
+    </View>
+  );
+}
 
 function PeopleStackNavigator() {
   return (
@@ -37,13 +45,16 @@ export default function AppStack() {
         tabBarActiveTintColor: '#3B82F6',
         tabBarInactiveTintColor: '#94a3b8',
         tabBarStyle: {
-          backgroundColor: '#0f172a',
+          position: 'absolute',
+          backgroundColor: 'transparent',
           borderTopColor: '#334155',
           borderTopWidth: 1,
           height: BASE_TAB_HEIGHT + insets.bottom,
           paddingBottom: Math.max(insets.bottom, 8),
           paddingTop: 8,
+          overflow: 'hidden',
         },
+        tabBarBackground: () => <TabBarGlassBackground />,
         tabBarLabelStyle: { fontSize: 12 },
         tabBarIcon: ({ focused, color, size }) => {
           let iconName: keyof typeof Ionicons.glyphMap = 'alert';
@@ -74,3 +85,18 @@ export default function AppStack() {
     </Tab.Navigator>
   );
 }
+
+const styles = StyleSheet.create({
+  tabGlassBase: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: Platform.OS === 'ios' ? 'rgba(15, 23, 42, 0.65)' : 'rgba(15, 23, 42, 0.92)',
+  },
+  tabGlassHighlight: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+  },
+});

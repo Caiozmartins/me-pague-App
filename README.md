@@ -85,6 +85,7 @@ src/
 - `cards`
 - `people`
 - `transactions`
+- `payments`
 - `invoices`
 - `trial_subscriptions`
 - `user_prefs`
@@ -111,6 +112,11 @@ service cloud.firestore {
     }
 
     match /transactions/{id} {
+      allow create: if ownerReq();
+      allow read, update, delete: if ownerRes();
+    }
+
+    match /payments/{id} {
       allow create: if ownerReq();
       allow read, update, delete: if ownerRes();
     }

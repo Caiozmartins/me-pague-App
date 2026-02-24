@@ -2,7 +2,6 @@
 
 // Tipos auxiliares
 export type AuthProvider = 'email' | 'google';
-export type IncomeType = 'salary' | 'bico' | 'extra' | 'refund';
 export type TransactionOrigin = 'purchase' | 'revolving';
 
 // 1. O Usuário
@@ -33,6 +32,7 @@ export interface Person {
   id: string;
   userId: string;
   name: string;           // Ex: "Mãe", "João"
+  phone?: string;
   note?: string;
   currentBalance: number; // Saldo atualizado (Positivo = te deve)
   createdAt: string;
@@ -72,16 +72,5 @@ export interface Payment {
   amount: number;
   date: string;
   note?: string;    
-  createdAt: string;
-}
-
-// 6. Renda (Seu dinheiro pessoal)
-export interface Income {
-  id: string;
-  userId: string;
-  amount: number;
-  date: string;
-  type: IncomeType;
-  description: string;
   createdAt: string;
 }
