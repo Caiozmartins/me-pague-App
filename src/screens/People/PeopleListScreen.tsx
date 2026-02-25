@@ -13,6 +13,35 @@ import { PeopleStackParamList } from '../../navigation/types';
 
 type Props = NativeStackScreenProps<PeopleStackParamList, 'PeopleList'>;
 
+const AVATAR_PALETTE = [
+  '#3B82F6', // blue
+  '#8B5CF6', // violet
+  '#EC4899', // pink
+  '#F59E0B', // amber
+  '#10B981', // emerald
+  '#06B6D4', // cyan
+  '#EF4444', // red
+  '#84CC16', // lime
+  '#F97316', // orange
+  '#6366F1', // indigo
+];
+
+function getAvatarColor(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return AVATAR_PALETTE[Math.abs(hash) % AVATAR_PALETTE.length];
+}
+
+function getInitials(name: string): string {
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+  return parts[0].slice(0, 2).toUpperCase();
+}
+
 export default function PeopleListScreen({ navigation }: Props) {
   const { user } = useContext(AuthContext);
   const [people, setPeople] = useState<Person[]>([]);
@@ -204,8 +233,8 @@ export default function PeopleListScreen({ navigation }: Props) {
           }
           renderItem={({ item }) => (
             <View style={styles.personCard}>
-              <View style={styles.avatar}>
-                <Text style={styles.avatarText}>{item.name.charAt(0).toUpperCase()}</Text>
+              <View style={[styles.avatar, { backgroundColor: getAvatarColor(item.name) }]}>
+                <Text style={styles.avatarText}>{getInitials(item.name)}</Text>
               </View>
               
               <TouchableOpacity

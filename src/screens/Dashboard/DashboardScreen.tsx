@@ -31,11 +31,12 @@ import {
   orderBy,
   doc,
   getDoc,
+  getDocs,
   Timestamp,
   runTransaction,
   writeBatch,
 } from 'firebase/firestore';
-import { signOut } from 'firebase/auth';
+import { signOut, deleteUser } from 'firebase/auth';
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
@@ -88,6 +89,11 @@ interface TrialSubscription {
   notificationId?: string | null;
   createdAt?: any;
 }
+
+type TrialTimelineItem = Omit<TrialSubscription, 'endDate'> & {
+  endDate: Date | null;
+  daysUntil: number | null;
+};
 
 /* SmartPicker: Substitui o seletor nativo por um Modal cross-platform. */
 function SmartPicker({
@@ -175,6 +181,11 @@ export default function DashboardScreen() {
   const [alertVisible, setAlertVisible] = useState(false);
   const [dueAlerts, setDueAlerts] = useState<string[]>([]);
   const [isValuesVisible, setIsValuesVisible] = useState(true);
+
+  // Salário
+  const [salary, setSalary] = useState<number | null>(null);
+  const [salaryModalVisible, setSalaryModalVisible] = useState(false);
+  const [salaryInput, setSalaryInput] = useState('');
 
   // Estados de Pagamento
   const [paymentModalVisible, setPaymentModalVisible] = useState(false);
@@ -276,6 +287,31 @@ export default function DashboardScreen() {
     reminder.setDate(reminder.getDate() - Math.max(1, notifyDaysBefore));
     reminder.setHours(9, 0, 0, 0);
     return reminder;
+  };
+  const getDateFromField = (value: unknown): Date | null => {
+    if (!value) return null;
+    if (value instanceof Date) return value;
+    if (typeof value === 'object' && 'toDate' in (value as object)) {
+      const candidate = (value as { toDate?: () => Date }).toDate;
+      if (typeof candidate === 'function') {
+        const converted = candidate();
+        if (converted instanceof Date && !Number.isNaN(converted.getTime())) return converted;
+      }
+    }
+    return null;
+  };
+  const getDaysUntil = (targetDate: Date) => {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const target = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
+    return Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  };
+  const formatTrialCountdown = (daysUntil: number) => {
+    if (daysUntil === 0) return 'Vence hoje';
+    if (daysUntil === 1) return 'Vence amanhã';
+    if (daysUntil > 1) return `Vence em ${daysUntil} dias`;
+    if (daysUntil === -1) return 'Venceu ontem';
+    return `Venceu há ${Math.abs(daysUntil)} dias`;
   };
   const triggerSuccessHaptic = async () => {
     if (Platform.OS === 'web') return;
@@ -422,8 +458,8 @@ export default function DashboardScreen() {
         const list = snap.docs
           .map((d) => ({ id: d.id, ...(d.data() as any) }) as TrialSubscription)
           .sort((a, b) => {
-            const aMs = a.endDate?.toDate ? a.endDate.toDate().getTime() : 0;
-            const bMs = b.endDate?.toDate ? b.endDate.toDate().getTime() : 0;
+            const aMs = getDateFromField(a.endDate)?.getTime() ?? 0;
+            const bMs = getDateFromField(b.endDate)?.getTime() ?? 0;
             return aMs - bMs;
           });
         setTrialSubscriptions(list);
@@ -439,6 +475,25 @@ export default function DashboardScreen() {
 
     return () => unsubTrials();
   }, [user]);
+
+  // Carregar salário do AsyncStorage
+  useEffect(() => {
+    AsyncStorage.getItem('@salary').then((val) => {
+      if (val !== null) setSalary(Number(val));
+    });
+  }, []);
+
+  const handleSaveSalary = async () => {
+    const parsed = Number(String(salaryInput).replace(/\./g, '').replace(',', '.'));
+    if (!parsed || parsed <= 0) {
+      Alert.alert('Valor inválido', 'Digite um salário válido.');
+      return;
+    }
+    await AsyncStorage.setItem('@salary', String(parsed));
+    setSalary(parsed);
+    setSalaryModalVisible(false);
+    setSalaryInput('');
+  };
 
   // Fechamento automático: snapshot mensal por cartão
   useEffect(() => {
@@ -654,7 +709,28 @@ export default function DashboardScreen() {
   };
 
   // Cálculos
-  const monthTotal = filteredTransactions.reduce((acc, t) => acc + (t.amount || 0), 0);
+  const monthTotal = filteredTransactions
+    .filter((t) => !t.paid)
+    .reduce((acc, t) => acc + (t.amount || 0), 0);
+
+  const ownCommitted = monthTransactions
+    .filter((t) => isOwnerPersonId(t.personId) && !t.paid)
+    .reduce((acc, t) => acc + (t.amount || 0), 0);
+  const commitPercent = salary && salary > 0 ? Math.min((ownCommitted / salary) * 100, 100) : 0;
+  const commitBarColor = commitPercent >= 70 ? '#EF4444' : commitPercent >= 40 ? '#F59E0B' : '#10B981';
+  const orderedTrialSubscriptions = [...trialSubscriptions].sort((a, b) => {
+    const aMs = getDateFromField(a.endDate)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+    const bMs = getDateFromField(b.endDate)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+    return aMs - bMs;
+  });
+  const trialTimeline: TrialTimelineItem[] = orderedTrialSubscriptions.map((item) => {
+    const endDate = getDateFromField(item.endDate);
+    const daysUntil = endDate ? getDaysUntil(endDate) : null;
+    return { ...item, endDate, daysUntil };
+  });
+  const trialEndingToday = trialTimeline.filter((item) => item.daysUntil === 0).length;
+  const trialEndingThisWeek = trialTimeline.filter((item) => typeof item.daysUntil === 'number' && item.daysUntil >= 0 && item.daysUntil <= 7).length;
+  const nextTrial = trialTimeline.find((item) => typeof item.daysUntil === 'number' && item.daysUntil >= 0) || trialTimeline[0];
 
   // Handler de Pagamento
   async function handlePayBill(amountPaid: number, cardId: string) {
@@ -803,6 +879,58 @@ export default function DashboardScreen() {
       await signOut(auth);
     } catch {
       Alert.alert('Erro', 'Não foi possível sair do app.');
+    }
+  };
+
+  const handleDeleteAccount = () => {
+    setMenuVisible(false);
+    Alert.alert(
+      'Excluir Conta',
+      'Todos os seus dados (transações, cartões, pessoas) serão apagados permanentemente. Esta ação não pode ser desfeita.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Continuar',
+          style: 'destructive',
+          onPress: () =>
+            Alert.alert(
+              'Confirmar exclusão',
+              'Tem certeza absoluta? Não será possível recuperar nenhum dado.',
+              [
+                { text: 'Cancelar', style: 'cancel' },
+                { text: 'Sim, excluir tudo', style: 'destructive', onPress: confirmDeleteAccount },
+              ]
+            ),
+        },
+      ]
+    );
+  };
+
+  const confirmDeleteAccount = async () => {
+    if (!user) return;
+    const uid = user.uid;
+    try {
+      const cols = ['transactions', 'cards', 'people', 'payments', 'trial_subscriptions'];
+      for (const col of cols) {
+        const snap = await getDocs(query(collection(db, col), where('userId', '==', uid)));
+        for (let i = 0; i < snap.docs.length; i += 400) {
+          const batch = writeBatch(db);
+          snap.docs.slice(i, i + 400).forEach((d) => batch.delete(d.ref));
+          await batch.commit();
+        }
+      }
+      const currentUser = auth.currentUser;
+      if (currentUser) await deleteUser(currentUser);
+    } catch (error: any) {
+      if (error?.code === 'auth/requires-recent-login') {
+        Alert.alert(
+          'Sessão expirada',
+          'Por segurança, saia do app, entre novamente e tente excluir a conta logo após o login.',
+          [{ text: 'OK' }]
+        );
+      } else {
+        Alert.alert('Erro', 'Não foi possível excluir a conta. Tente novamente.');
+      }
     }
   };
 
@@ -1110,6 +1238,11 @@ export default function DashboardScreen() {
     setTrialNotifyDays('1');
   }
 
+  function openTrialManager() {
+    resetTrialForm();
+    setTrialModalVisible(true);
+  }
+
   async function handleSaveTrialSubscription() {
     if (!user) return;
     if (!trialName.trim() || !trialCardId || !trialEndDateText.trim()) {
@@ -1245,6 +1378,10 @@ export default function DashboardScreen() {
 
       {/* HEADER */}
       <View style={styles.header}>
+        <TouchableOpacity style={styles.profileIconTopLeft} onPress={() => setMenuVisible(true)}>
+          <Ionicons name="person-circle-outline" size={28} color="#FFF" />
+        </TouchableOpacity>
+
         <View style={styles.monthNav}>
           <TouchableOpacity onPress={() => changeMonth(-1)}>
             <Ionicons name="chevron-back" size={24} color="#FFF" />
@@ -1295,10 +1432,6 @@ export default function DashboardScreen() {
             >
               <Text style={styles.payBillText}>PAGAR</Text>
             </TouchableOpacity>
-
-            <TouchableOpacity style={styles.profileIcon} onPress={() => setMenuVisible(true)}>
-              <Ionicons name="person-circle-outline" size={28} color="#FFF" />
-            </TouchableOpacity>
           </View>
         </View>
       </View>
@@ -1317,6 +1450,74 @@ export default function DashboardScreen() {
             />
           </View>
         </View>
+
+        {/* CARD COMPROMETIMENTO SALARIAL */}
+        <TouchableOpacity
+          style={styles.salaryCard}
+          activeOpacity={0.88}
+          onPress={() => {
+            setSalaryInput(salary ? String(salary).replace('.', ',') : '');
+            setSalaryModalVisible(true);
+          }}
+        >
+          <View style={styles.salaryCardHeader}>
+            <View style={styles.salaryCardLeft}>
+              <Ionicons name="wallet-outline" size={16} color="#10B981" />
+              <Text style={styles.salaryCardTitle}>Comprometimento Salarial</Text>
+            </View>
+            <Ionicons name="pencil-outline" size={14} color="#64748b" />
+          </View>
+
+          {salary ? (
+            <>
+              <View style={styles.salaryCardRow}>
+                <Text style={styles.salaryCommittedValue}>
+                  {isValuesVisible
+                    ? ownCommitted.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+                    : '••••••'}
+                </Text>
+                <Text style={[styles.salaryCommittedPct, { color: commitBarColor }]}>
+                  {commitPercent.toFixed(1)}%
+                </Text>
+              </View>
+              <Text style={styles.salarySubtitle}>
+                do salário de{' '}
+                {isValuesVisible
+                  ? salary.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+                  : '••••••'}{' '}
+                comprometido neste mês
+              </Text>
+              <View style={styles.salaryBarTrack}>
+                <View style={[styles.salaryBarFill, { width: `${commitPercent}%` as any, backgroundColor: commitBarColor }]} />
+              </View>
+            </>
+          ) : (
+            <Text style={styles.salaryEmpty}>Toque para definir seu salário e acompanhar o comprometimento</Text>
+          )}
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.trialSpotlight} activeOpacity={0.92} onPress={openTrialManager}>
+          <View style={styles.trialSpotlightHeader}>
+            <View style={styles.trialSpotlightIconWrap}>
+              <Ionicons name="timer-outline" size={18} color="#0f172a" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.trialSpotlightTitle}>Assinaturas Temporárias</Text>
+              <Text style={styles.trialSpotlightSubtitle}>
+                {trialTimeline.length === 0
+                  ? 'Controle testes grátis para não cair cobrança surpresa.'
+                  : `${trialTimeline.length} ativa(s) • ${trialEndingThisWeek} vencendo em 7 dias`}
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color="#bfdbfe" />
+          </View>
+
+          <Text style={styles.trialSpotlightNext}>
+            {nextTrial && nextTrial.endDate && typeof nextTrial.daysUntil === 'number'
+              ? `${trialTimeline.length} ativa(s) • ${trialEndingToday} hoje • próxima: ${nextTrial.name} (${formatTrialCountdown(nextTrial.daysUntil).toLowerCase()})`
+              : 'Toque para cadastrar sua primeira assinatura temporária.'}
+          </Text>
+        </TouchableOpacity>
 
         {loading ? (
           <ActivityIndicator color="#3B82F6" />
@@ -1417,21 +1618,57 @@ export default function DashboardScreen() {
               autoFocus
             />
 
-            <TouchableOpacity
-              style={styles.saveButton}
-              onPress={() => {
-                const val = Number(String(paymentValue).replace(/\./g, '').replace(',', '.'));
-                if (!selectedCardForPay) return Alert.alert('Erro', 'Selecione um cartão para pagar.');
-                handlePayBill(val, selectedCardForPay);
-                setPaymentModalVisible(false);
-              }}
-            >
-              <Text style={styles.saveButtonText}>Confirmar Pagamento</Text>
-            </TouchableOpacity>
+            <View style={styles.paymentModalButtons}>
+              <TouchableOpacity
+                style={styles.paymentBtnCancel}
+                onPress={() => setPaymentModalVisible(false)}
+              >
+                <Text style={styles.paymentBtnCancelText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.paymentBtnConfirm}
+                onPress={() => {
+                  const val = Number(String(paymentValue).replace(/\./g, '').replace(',', '.'));
+                  if (!selectedCardForPay) return Alert.alert('Erro', 'Selecione um cartão para pagar.');
+                  handlePayBill(val, selectedCardForPay);
+                  setPaymentModalVisible(false);
+                }}
+              >
+                <Text style={styles.paymentBtnConfirmText}>Confirmar</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
-            <TouchableOpacity onPress={() => setPaymentModalVisible(false)} style={{ marginTop: 15 }}>
-              <Text style={{ color: '#94a3b8' }}>Cancelar</Text>
-            </TouchableOpacity>
+      {/* MODAL SALÁRIO */}
+      <Modal visible={salaryModalVisible} transparent animationType="fade">
+        <View style={styles.alertOverlay}>
+          <View style={styles.alertBox}>
+            <Text style={styles.alertTitle}>Seu Salário Mensal</Text>
+            <Text style={[styles.alertText, { marginBottom: 16 }]}>
+              Usado para calcular quanto da sua renda está comprometida com cartões.
+            </Text>
+            <TextInput
+              style={styles.amountInput}
+              keyboardType="numeric"
+              placeholder="Ex: 5000,00"
+              placeholderTextColor="#475569"
+              value={salaryInput}
+              onChangeText={setSalaryInput}
+              autoFocus
+            />
+            <View style={styles.paymentModalButtons}>
+              <TouchableOpacity
+                style={styles.paymentBtnCancel}
+                onPress={() => { setSalaryModalVisible(false); setSalaryInput(''); }}
+              >
+                <Text style={styles.paymentBtnCancelText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.paymentBtnConfirm} onPress={handleSaveSalary}>
+                <Text style={styles.paymentBtnConfirmText}>Salvar</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -1555,103 +1792,182 @@ export default function DashboardScreen() {
               style={styles.menuItem}
               onPress={() => {
                 setMenuVisible(false);
-                resetTrialForm();
-                setTrialModalVisible(true);
+                openTrialManager();
               }}
             >
               <Ionicons name="timer-outline" size={22} color="#FFF" />
               <Text style={styles.menuItemText}>Assinaturas Temporárias</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={[styles.menuItem, { borderBottomWidth: 0 }]} onPress={handleLogout}>
+            <TouchableOpacity style={styles.menuItem} onPress={handleLogout}>
               <Ionicons name="log-out-outline" size={22} color="#EF4444" />
               <Text style={[styles.menuItemText, { color: '#EF4444' }]}>Sair do App</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[styles.menuItem, { borderBottomWidth: 0 }]} onPress={handleDeleteAccount}>
+              <Ionicons name="trash-outline" size={22} color="#7f1d1d" />
+              <Text style={[styles.menuItemText, { color: '#7f1d1d' }]}>Excluir Conta</Text>
             </TouchableOpacity>
           </View>
         </TouchableOpacity>
       </Modal>
 
       {/* MODAL ASSINATURAS TEMPORÁRIAS */}
-      <Modal visible={trialModalVisible} transparent animationType="fade">
-        <View style={styles.alertOverlay}>
-          <View style={styles.alertBox}>
-            <Text style={styles.alertTitle}>Assinaturas Temporárias</Text>
+      <Modal visible={trialModalVisible} transparent animationType="slide" onRequestClose={() => setTrialModalVisible(false)}>
+        <View style={styles.trialModalOverlay}>
+          <TouchableOpacity style={styles.trialModalBackdrop} activeOpacity={1} onPress={() => setTrialModalVisible(false)} />
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.trialModalKeyboard}>
+            <View style={styles.trialModalSheet}>
+              <View style={styles.trialModalHandle} />
 
-            <View style={{ width: '100%' }}>
-              <Text style={styles.label}>Nome do Serviço</Text>
-              <TextInput
-                style={styles.input}
-                value={trialName}
-                onChangeText={setTrialName}
-                placeholder="Ex: Netflix grátis"
-                placeholderTextColor="#64748b"
-              />
-            </View>
+              <View style={styles.trialModalHeader}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.trialModalTitle}>Assinaturas Temporárias</Text>
+                  <Text style={styles.trialModalSubtitle}>
+                    Controle seus testes grátis com alertas e vencimentos visíveis.
+                  </Text>
+                </View>
+                <TouchableOpacity style={styles.trialModalCloseButton} onPress={() => setTrialModalVisible(false)}>
+                  <Ionicons name="close" size={20} color="#cbd5e1" />
+                </TouchableOpacity>
+              </View>
 
-            <View style={{ width: '100%', marginTop: 12 }}>
-              <SmartPicker
-                label="Cartão"
-                items={myCards}
-                selectedValue={trialCardId}
-                onValueChange={(v) => setTrialCardId(v || '')}
-                placeholder="Selecione o cartão"
-                fullWidth
-              />
-            </View>
+              <View style={styles.trialModalStatsRow}>
+                <View style={styles.trialStatBox}>
+                  <Text style={styles.trialStatValue}>{trialTimeline.length}</Text>
+                  <Text style={styles.trialStatLabel}>Ativas</Text>
+                </View>
+                <View style={styles.trialStatBox}>
+                  <Text style={styles.trialStatValue}>{trialEndingToday}</Text>
+                  <Text style={styles.trialStatLabel}>Hoje</Text>
+                </View>
+                <View style={styles.trialStatBox}>
+                  <Text style={styles.trialStatValue}>{trialEndingThisWeek}</Text>
+                  <Text style={styles.trialStatLabel}>7 dias</Text>
+                </View>
+              </View>
 
-            <View style={{ width: '100%', marginTop: 12 }}>
-              <Text style={styles.label}>Fim do Período Grátis</Text>
-              <TextInputMask
-                type={'datetime'}
-                options={{ format: 'DD/MM/YYYY' }}
-                style={styles.input}
-                value={trialEndDateText}
-                onChangeText={setTrialEndDateText}
-              />
-            </View>
+              <ScrollView
+                style={styles.trialModalScroll}
+                contentContainerStyle={styles.trialModalScrollContent}
+                keyboardShouldPersistTaps="handled"
+              >
+                <View style={styles.trialFormCard}>
+                  <Text style={styles.trialSectionTitle}>Nova assinatura</Text>
 
-            <View style={{ width: '100%', marginTop: 12 }}>
-              <Text style={styles.label}>Avisar Quantos Dias Antes</Text>
-              <TextInput
-                style={styles.input}
-                keyboardType="numeric"
-                value={trialNotifyDays}
-                onChangeText={setTrialNotifyDays}
-              />
-            </View>
+                  <View style={{ width: '100%' }}>
+                    <Text style={styles.label}>Nome do Serviço</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={trialName}
+                      onChangeText={setTrialName}
+                      placeholder="Ex: Netflix grátis"
+                      placeholderTextColor="#64748b"
+                    />
+                  </View>
 
-            <TouchableOpacity style={[styles.saveButton, isSavingTrial && { opacity: 0.7 }]} onPress={handleSaveTrialSubscription} disabled={isSavingTrial}>
-              <Text style={styles.saveButtonText}>{isSavingTrial ? 'SALVANDO...' : 'Adicionar'}</Text>
-            </TouchableOpacity>
+                  <View style={{ width: '100%', marginTop: 12 }}>
+                    <SmartPicker
+                      label="Cartão"
+                      items={myCards}
+                      selectedValue={trialCardId}
+                      onValueChange={(v) => setTrialCardId(v || '')}
+                      placeholder="Selecione o cartão"
+                      fullWidth
+                    />
+                  </View>
 
-            <ScrollView style={{ width: '100%', maxHeight: 220, marginTop: 14 }}>
-              {trialSubscriptions.length === 0 ? (
-                <Text style={styles.alertText}>Nenhuma assinatura temporária cadastrada.</Text>
-              ) : (
-                trialSubscriptions.map((item) => {
-                  const endDate = item.endDate?.toDate ? item.endDate.toDate() : null;
-                  return (
-                    <View key={item.id} style={styles.trialItem}>
-                      <View style={{ flex: 1, marginRight: 8 }}>
-                        <Text style={styles.trialTitle}>{item.name}</Text>
-                        <Text style={styles.trialSubtitle}>
-                          {item.cardName} • fim {endDate ? toPtBrDate(endDate) : '--'}
-                        </Text>
-                        <Text style={styles.trialSubtitle}>Aviso: {item.notifyDaysBefore} dia(s) antes</Text>
+                  <View style={{ width: '100%', marginTop: 12 }}>
+                    <Text style={styles.label}>Fim do Período Grátis</Text>
+                    <TextInputMask
+                      type={'datetime'}
+                      options={{ format: 'DD/MM/YYYY' }}
+                      style={styles.input}
+                      value={trialEndDateText}
+                      onChangeText={setTrialEndDateText}
+                    />
+                  </View>
+
+                  <View style={{ width: '100%', marginTop: 12 }}>
+                    <Text style={styles.label}>Avisar Quantos Dias Antes</Text>
+                    <TextInput
+                      style={styles.input}
+                      keyboardType="numeric"
+                      value={trialNotifyDays}
+                      onChangeText={setTrialNotifyDays}
+                    />
+                  </View>
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.trialSaveButton, isSavingTrial && { opacity: 0.7 }]}
+                  onPress={handleSaveTrialSubscription}
+                  disabled={isSavingTrial}
+                >
+                  <Ionicons name="add-circle-outline" size={18} color="#0f172a" />
+                  <Text style={styles.trialSaveButtonText}>{isSavingTrial ? 'SALVANDO...' : 'Adicionar Assinatura'}</Text>
+                </TouchableOpacity>
+
+                <View style={styles.trialListHeaderRow}>
+                  <Text style={styles.trialSectionTitle}>Assinaturas cadastradas</Text>
+                  <Text style={styles.trialListCount}>{trialTimeline.length}</Text>
+                </View>
+
+                {trialTimeline.length === 0 ? (
+                  <View style={styles.trialEmptyState}>
+                    <Ionicons name="sparkles-outline" size={22} color="#93c5fd" />
+                    <Text style={styles.trialEmptyText}>Nenhuma assinatura temporária cadastrada.</Text>
+                  </View>
+                ) : (
+                  trialTimeline.map((item) => {
+                    const isExpired = typeof item.daysUntil === 'number' && item.daysUntil < 0;
+                    const isUrgent = typeof item.daysUntil === 'number' && item.daysUntil >= 0 && item.daysUntil <= 2;
+                    return (
+                      <View
+                        key={item.id}
+                        style={[
+                          styles.trialListItem,
+                          isExpired && styles.trialListItemExpired,
+                          isUrgent && styles.trialListItemUrgent,
+                        ]}
+                      >
+                        <View style={{ flex: 1, marginRight: 8 }}>
+                          <Text style={styles.trialTitle}>{item.name}</Text>
+                          <Text style={styles.trialSubtitle}>
+                            {item.cardName} • fim {item.endDate ? toPtBrDate(item.endDate) : '--'}
+                          </Text>
+                          <View
+                            style={[
+                              styles.trialCountdownBadge,
+                              isExpired && styles.trialCountdownBadgeExpired,
+                              isUrgent && styles.trialCountdownBadgeUrgent,
+                            ]}
+                          >
+                            <Ionicons
+                              name="alarm-outline"
+                              size={13}
+                              color={isExpired || isUrgent ? '#7f1d1d' : '#1e3a8a'}
+                            />
+                            <Text
+                              style={[
+                                styles.trialCountdownText,
+                                (isExpired || isUrgent) && styles.trialCountdownTextUrgent,
+                              ]}
+                            >
+                              {typeof item.daysUntil === 'number' ? formatTrialCountdown(item.daysUntil) : 'Data indisponível'}
+                            </Text>
+                          </View>
+                        </View>
+                        <TouchableOpacity onPress={() => handleDeleteTrialSubscription(item)} style={styles.trialDeleteButton}>
+                          <Ionicons name="trash-outline" size={18} color="#fca5a5" />
+                        </TouchableOpacity>
                       </View>
-                      <TouchableOpacity onPress={() => handleDeleteTrialSubscription(item)} style={styles.actionButton}>
-                        <Ionicons name="trash-outline" size={20} color="#EF4444" />
-                      </TouchableOpacity>
-                    </View>
-                  );
-                })
-              )}
-            </ScrollView>
-
-            <TouchableOpacity onPress={() => setTrialModalVisible(false)} style={{ marginTop: 15 }}>
-              <Text style={{ color: '#94a3b8' }}>Fechar</Text>
-            </TouchableOpacity>
-          </View>
+                    );
+                  })
+                )}
+              </ScrollView>
+            </View>
+          </KeyboardAvoidingView>
         </View>
       </Modal>
     </SafeAreaView>
@@ -1681,6 +1997,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#334155',
   },
+  profileIconTopLeft: {
+    position: 'absolute',
+    top: 8,
+    left: 24,
+    zIndex: 5,
+  },
 
   payBillButton: { backgroundColor: '#00ff66ff', paddingHorizontal: 15, paddingVertical: 12, borderRadius: 10 },
   payBillText: { color: '#000000ff', fontWeight: 'bold', fontSize: 14 },
@@ -1688,6 +2010,27 @@ const styles = StyleSheet.create({
   body: { flex: 1, paddingHorizontal: 20, marginTop: 20 },
   bodyHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 },
   sectionTitle: { fontSize: 18, fontWeight: '700', color: '#FFF', textTransform: 'capitalize' },
+  trialSpotlight: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1d4ed8',
+    backgroundColor: '#0b1f40',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 12,
+  },
+  trialSpotlightHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 6, gap: 8 },
+  trialSpotlightIconWrap: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: '#93c5fd',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  trialSpotlightTitle: { color: '#f8fafc', fontSize: 13, fontWeight: '700' },
+  trialSpotlightSubtitle: { color: '#93c5fd', fontSize: 11, marginTop: 1 },
+  trialSpotlightNext: { color: '#dbeafe', fontSize: 11 },
 
   cardItem: {
     backgroundColor: '#1e293b',
@@ -1866,26 +2209,250 @@ const styles = StyleSheet.create({
   pickerMenuItem: { paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: '#334155', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   pickerMenuItemText: { color: '#FFF', fontSize: 16, flex: 1, marginRight: 10 },
 
-  alertOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', padding: 20 },
-  alertBox: { backgroundColor: '#1e293b', borderRadius: 20, padding: 25, width: '100%', alignItems: 'center', borderWidth: 1, borderColor: '#334155' },
-  alertTitle: { fontSize: 20, fontWeight: 'bold', color: '#FFF', marginBottom: 15 },
-  alertText: { fontSize: 16, color: '#cbd5e1', marginBottom: 15, textAlign: 'center' },
-  alertButton: { backgroundColor: '#EF4444', paddingVertical: 12, paddingHorizontal: 30, borderRadius: 10, width: '100%', alignItems: 'center' },
-  alertButtonText: { color: '#FFF', fontWeight: 'bold' },
-  trialItem: {
+  trialModalOverlay: { flex: 1, justifyContent: 'flex-end' },
+  trialModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+  },
+  trialModalKeyboard: { justifyContent: 'flex-end' },
+  trialModalSheet: {
+    backgroundColor: '#111f37',
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    borderTopWidth: 1,
+    borderColor: '#1e3a8a',
+    maxHeight: '92%',
+    paddingBottom: 20,
+  },
+  trialModalHandle: {
+    width: 42,
+    height: 5,
+    borderRadius: 99,
+    backgroundColor: '#33548f',
+    alignSelf: 'center',
+    marginTop: 10,
+    marginBottom: 8,
+  },
+  trialModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingHorizontal: 18,
+    paddingBottom: 12,
+  },
+  trialModalTitle: { color: '#f8fafc', fontWeight: '800', fontSize: 20, marginBottom: 4 },
+  trialModalSubtitle: { color: '#93c5fd', fontSize: 13, lineHeight: 18, maxWidth: 280 },
+  trialModalCloseButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: '#334155',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(15,23,42,0.45)',
+    marginLeft: 10,
+  },
+  trialModalStatsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 18,
+    marginBottom: 12,
+  },
+  trialStatBox: {
+    flex: 1,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(147,197,253,0.25)',
+    backgroundColor: 'rgba(15,23,42,0.6)',
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  trialStatValue: { color: '#fff', fontSize: 18, fontWeight: '800', fontVariant: ['tabular-nums'] },
+  trialStatLabel: { color: '#bfdbfe', fontSize: 11, textTransform: 'uppercase', marginTop: 2 },
+  trialModalScroll: { maxHeight: '100%' },
+  trialModalScrollContent: { paddingHorizontal: 18, paddingBottom: 18 },
+  trialFormCard: {
+    borderWidth: 1,
+    borderColor: '#1e3a8a',
+    backgroundColor: 'rgba(15,23,42,0.55)',
+    borderRadius: 16,
+    padding: 14,
+  },
+  trialSectionTitle: { color: '#f8fafc', fontSize: 15, fontWeight: '700', marginBottom: 12 },
+  trialSaveButton: {
+    marginTop: 12,
+    marginBottom: 16,
+    backgroundColor: '#93c5fd',
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#0f172a',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  trialSaveButtonText: { color: '#0f172a', fontWeight: '800', fontSize: 14 },
+  trialListHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  trialListCount: {
+    minWidth: 30,
+    height: 30,
+    borderRadius: 15,
+    textAlign: 'center',
+    textAlignVertical: 'center',
+    lineHeight: 30,
+    backgroundColor: '#1e3a8a',
+    color: '#dbeafe',
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  trialEmptyState: {
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: 'rgba(15,23,42,0.5)',
+    borderRadius: 14,
+    padding: 14,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  trialEmptyText: { color: '#93c5fd', fontSize: 13 },
+  trialListItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15,23,42,0.58)',
     borderRadius: 12,
     borderWidth: 1,
     borderColor: '#334155',
     padding: 12,
     marginBottom: 10,
   },
+  trialListItemExpired: {
+    borderColor: 'rgba(248,113,113,0.45)',
+    backgroundColor: 'rgba(127,29,29,0.18)',
+  },
+  trialListItemUrgent: {
+    borderColor: 'rgba(251,191,36,0.52)',
+    backgroundColor: 'rgba(120,53,15,0.18)',
+  },
+  trialCountdownBadge: {
+    marginTop: 7,
+    borderRadius: 999,
+    backgroundColor: 'rgba(147,197,253,0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(147,197,253,0.35)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 5,
+  },
+  trialCountdownBadgeExpired: {
+    backgroundColor: 'rgba(252,165,165,0.25)',
+    borderColor: 'rgba(252,165,165,0.5)',
+  },
+  trialCountdownBadgeUrgent: {
+    backgroundColor: 'rgba(253,230,138,0.3)',
+    borderColor: 'rgba(253,230,138,0.58)',
+  },
+  trialCountdownText: { color: '#bfdbfe', fontSize: 11, fontWeight: '700' },
+  trialCountdownTextUrgent: { color: '#7f1d1d' },
+  trialDeleteButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: 'rgba(248,113,113,0.45)',
+    backgroundColor: 'rgba(127,29,29,0.25)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  alertOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', padding: 20 },
+  alertBox: { backgroundColor: '#1e293b', borderRadius: 20, padding: 25, width: '100%', alignItems: 'center', borderWidth: 1, borderColor: '#334155' },
+  alertTitle: { fontSize: 20, fontWeight: 'bold', color: '#FFF', marginBottom: 15 },
+  alertText: { fontSize: 16, color: '#cbd5e1', marginBottom: 15, textAlign: 'center' },
+  alertButton: { backgroundColor: '#EF4444', paddingVertical: 12, paddingHorizontal: 30, borderRadius: 10, width: '100%', alignItems: 'center' },
+  alertButtonText: { color: '#FFF', fontWeight: 'bold' },
   trialTitle: { color: '#FFF', fontWeight: '700', fontSize: 14, marginBottom: 4 },
   trialSubtitle: { color: '#94a3b8', fontSize: 12 },
 
-  amountInput: { backgroundColor: '#0f172a', color: '#FFF', fontSize: 24, padding: 15, width: '100%', textAlign: 'center', borderRadius: 12, marginBottom: 15, borderWidth: 1, borderColor: '#334155' },
+  amountInput: { backgroundColor: '#0f172a', color: '#FFF', fontSize: 16, paddingVertical: 16, paddingHorizontal: 16, minHeight: 56, width: '100%', textAlign: 'center', borderRadius: 12, marginBottom: 15, borderWidth: 1, borderColor: '#334155' },
+
+  salaryCard: {
+    backgroundColor: '#1e293b',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  salaryCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  salaryCardLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  salaryCardTitle: {
+    color: '#cbd5e1',
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.3,
+  },
+  salaryCardRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  salaryCommittedValue: {
+    color: '#f1f5f9',
+    fontSize: 22,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  salaryCommittedPct: {
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  salarySubtitle: {
+    color: '#64748b',
+    fontSize: 11,
+    marginBottom: 10,
+  },
+  salaryBarTrack: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    overflow: 'hidden',
+  },
+  salaryBarFill: {
+    height: 4,
+    borderRadius: 2,
+  },
+  salaryEmpty: {
+    color: '#475569',
+    fontSize: 13,
+    fontStyle: 'italic',
+    textAlign: 'center',
+    paddingVertical: 4,
+  },
+  paymentModalButtons: { flexDirection: 'row', gap: 12, width: '100%', marginTop: 4 },
+  paymentBtnCancel: { flex: 1, paddingVertical: 16, borderRadius: 12, alignItems: 'center', backgroundColor: '#334155' },
+  paymentBtnCancelText: { color: '#cbd5e1', fontWeight: '700', fontSize: 15 },
+  paymentBtnConfirm: { flex: 1, paddingVertical: 16, borderRadius: 12, alignItems: 'center', backgroundColor: '#3B82F6' },
+  paymentBtnConfirmText: { color: '#FFF', fontWeight: '700', fontSize: 15 },
 
   menuOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-start', alignItems: 'flex-end', paddingTop: 80, paddingRight: 20 },
   menuContent: { backgroundColor: '#1e293b', borderRadius: 20, width: 220, padding: 15, borderWidth: 1, borderColor: '#334155' },
